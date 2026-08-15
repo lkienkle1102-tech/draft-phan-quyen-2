@@ -3,7 +3,7 @@ package infra
 import (
 	"context"
 	"database/sql"
-	"fmt"
+	"errors"
 	"strings"
 	"time"
 
@@ -53,40 +53,126 @@ func (r *Repository) ResolveExternalAccess(ctx context.Context, actor domain.Act
 }
 
 func (r *Repository) ExternalPermission(ctx context.Context, access domain.ExternalAccess, operation domain.Operation) (bool, error) {
+	allowed, denied, err := r.externalDirectPermission(ctx, access, operation)
+	if err != nil {
+		return false, err
+	}
+	directoryAllowed, directoryDenied, err := r.externalDirectoryPermission(ctx, access, operation)
+	if err != nil {
+		return false, err
+	}
+	return (allowed || directoryAllowed) && !denied && !directoryDenied, nil
+}
+
+func (r *Repository) externalDirectPermission(ctx context.Context, access domain.ExternalAccess, operation domain.Operation) (bool, bool, error) {
 	clause, args, ok := externalIDs(access)
 	if !ok {
-		return false, nil
+		return false, false, nil
 	}
-	args = append(args, operation.ResourceType, operation.Action)
-	query := `WITH effects AS(
-		SELECT item.effect FROM external_grant_permissions_v2 item JOIN permissions p ON p.id=item.permission_id WHERE item.grant_id IN (` + clause + `) AND p.resource_type=? AND p.action=?
-		UNION ALL
-		SELECT CASE WHEN item.effect='deny' OR rp.effect='deny' THEN 'deny' ELSE 'allow' END FROM external_grant_roles_v2 item JOIN role_permission_rules_v2 rp ON rp.role_id=item.role_id JOIN permissions p ON p.id=rp.permission_id WHERE item.grant_id IN (` + clause + `) AND p.resource_type=? AND p.action=?
-		UNION ALL
-		SELECT CASE WHEN item.effect='deny' OR gr.effect='deny' OR rp.effect='deny' THEN 'deny' ELSE 'allow' END FROM external_grant_groups_v2 item JOIN group_role_rules_v2 gr ON gr.group_id=item.group_id JOIN role_permission_rules_v2 rp ON rp.role_id=gr.role_id JOIN permissions p ON p.id=rp.permission_id WHERE item.grant_id IN (` + clause + `) AND p.resource_type=? AND p.action=?
-	) SELECT EXISTS(SELECT 1 FROM effects WHERE effect='allow') AND NOT EXISTS(SELECT 1 FROM effects WHERE effect='deny')`
-	all := append([]any{}, args...)
-	all = append(all, accessArgs(access)...)
-	all = append(all, operation.ResourceType, operation.Action)
-	all = append(all, accessArgs(access)...)
-	all = append(all, operation.ResourceType, operation.Action)
-	return queryBool(ctx, r.database, query, all...)
+	rows, err := r.database.QueryContext(ctx, `SELECT item.effect FROM external_grant_permissions_v2 item JOIN permissions permission ON permission.id=item.permission_id WHERE item.grant_id IN (`+clause+`) AND permission.resource_type=? AND permission.action=?`, append(args, operation.ResourceType, operation.Action)...)
+	if err != nil {
+		return false, false, err
+	}
+	return readEffects(rows)
+}
+
+func (r *Repository) externalDirectoryPermission(ctx context.Context, access domain.ExternalAccess, operation domain.Operation) (bool, bool, error) {
+	items, err := r.externalDirectoryItems(ctx, access)
+	if err != nil {
+		return false, false, err
+	}
+	if len(items) == 0 {
+		return false, false, nil
+	}
+	if r.directory == nil {
+		return false, false, errors.New("authorization directory is required")
+	}
+	snapshot, err := r.directory.Snapshot(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	allowed, denied := false, false
+	for _, item := range items {
+		for _, policy := range domain.PoliciesForPrincipal(snapshot.Rules, item.kind+"::"+item.id, "organization::"+access.OwnerOrganizationID) {
+			if policy.V2 == operation.ResourceType && policy.V3 == operation.Action {
+				allowed = allowed || (item.effect == "allow" && policy.V4 == "allow")
+				denied = denied || item.effect == "deny" || policy.V4 == "deny"
+			}
+		}
+	}
+	return allowed, denied, nil
 }
 
 func (r *Repository) ExternalRole(ctx context.Context, access domain.ExternalAccess, name string) (bool, error) {
-	return r.externalNamed(ctx, access, `SELECT item.effect FROM external_grant_roles_v2 item JOIN roles_v2 value ON value.id=item.role_id WHERE item.grant_id IN (%s) AND value.owner_type='organization' AND value.owner_id=? AND value.name=? AND value.active=1`, name)
+	return r.externalDirectoryNamed(ctx, access, "role", name)
 }
 func (r *Repository) ExternalGroup(ctx context.Context, access domain.ExternalAccess, name string) (bool, error) {
-	return r.externalNamed(ctx, access, `SELECT item.effect FROM external_grant_groups_v2 item JOIN groups_v2 value ON value.id=item.group_id WHERE item.grant_id IN (%s) AND value.owner_type='organization' AND value.owner_id=? AND value.name=? AND value.active=1`, name)
+	return r.externalDirectoryNamed(ctx, access, "group", name)
 }
-func (r *Repository) externalNamed(ctx context.Context, access domain.ExternalAccess, template, name string) (bool, error) {
+
+type externalDirectoryItem struct{ kind, id, effect string }
+
+func (r *Repository) externalDirectoryItems(ctx context.Context, access domain.ExternalAccess) ([]externalDirectoryItem, error) {
 	clause, args, ok := externalIDs(access)
 	if !ok {
-		return false, nil
+		return nil, nil
 	}
-	args = append(args, access.OwnerOrganizationID, name)
-	query := `WITH effects AS(` + fmt.Sprintf(template, clause) + `) SELECT EXISTS(SELECT 1 FROM effects WHERE effect='allow') AND NOT EXISTS(SELECT 1 FROM effects WHERE effect='deny')`
-	return queryBool(ctx, r.database, query, args...)
+	query := `SELECT 'role',role_id,effect FROM external_grant_roles_v2 WHERE grant_id IN (` + clause + `) UNION ALL SELECT 'group',group_id,effect FROM external_grant_groups_v2 WHERE grant_id IN (` + clause + `)`
+	rows, err := r.database.QueryContext(ctx, query, append(args, accessArgs(access)...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var result []externalDirectoryItem
+	for rows.Next() {
+		var item externalDirectoryItem
+		if err = rows.Scan(&item.kind, &item.id, &item.effect); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) externalDirectoryNamed(ctx context.Context, access domain.ExternalAccess, kind, name string) (bool, error) {
+	items, err := r.externalDirectoryItems(ctx, access)
+	if err != nil || len(items) == 0 {
+		return false, err
+	}
+	if r.directory == nil {
+		return false, errors.New("authorization directory is required")
+	}
+	snapshot, err := r.directory.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	directory := snapshot.Roles
+	if kind == "group" {
+		directory = snapshot.Groups
+	}
+	allowed, denied := false, false
+	for _, item := range items {
+		value := directory[item.id]
+		if item.kind != kind || (item.id != name && value.Name != name) {
+			continue
+		}
+		allowed = allowed || item.effect == "allow"
+		denied = denied || item.effect == "deny"
+	}
+	return allowed && !denied, nil
+}
+
+func readEffects(rows *sql.Rows) (allowed, denied bool, resultErr error) {
+	defer func() { resultErr = errors.Join(resultErr, rows.Close()) }()
+	for rows.Next() {
+		var effect string
+		if err := rows.Scan(&effect); err != nil {
+			return false, false, err
+		}
+		allowed = allowed || effect == "allow"
+		denied = denied || effect == "deny"
+	}
+	return allowed, denied, rows.Err()
 }
 func (r *Repository) ExternalFeature(ctx context.Context, access domain.ExternalAccess, key string) (bool, error) {
 	return r.externalSimple(ctx, access, "external_grant_features_v2", "feature_key", key)

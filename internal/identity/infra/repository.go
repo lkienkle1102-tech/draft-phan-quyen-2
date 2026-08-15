@@ -4,6 +4,7 @@ package infra
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,9 +14,22 @@ import (
 	security "example.com/phan-quyen-golang/internal/security/domain"
 )
 
-type Repository struct{ database *sql.DB }
+type policyDirectory interface {
+	Snapshot(context.Context) (security.AuthorizationSnapshot, error)
+}
 
-func NewRepository(database *sql.DB) *Repository { return &Repository{database: database} }
+type Repository struct {
+	database  *sql.DB
+	directory policyDirectory
+}
+
+func NewRepository(database *sql.DB, directories ...policyDirectory) *Repository {
+	var directory policyDirectory
+	if len(directories) != 0 {
+		directory = directories[0]
+	}
+	return &Repository{database: database, directory: directory}
+}
 
 type scopeAccumulator struct {
 	target                     *identity.Entitlements
@@ -37,6 +51,13 @@ func newScopeAccumulator(target *identity.Entitlements) *scopeAccumulator {
 }
 
 func (r *Repository) Read(ctx context.Context, actor security.Actor, at time.Time) (identity.Snapshot, error) {
+	if r.directory == nil {
+		return identity.Snapshot{}, errors.New("authorization directory is required")
+	}
+	authorization, err := r.directory.Snapshot(ctx)
+	if err != nil {
+		return identity.Snapshot{}, err
+	}
 	tx, err := r.database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return identity.Snapshot{}, err
@@ -47,10 +68,11 @@ func (r *Repository) Read(ctx context.Context, actor security.Actor, at time.Tim
 		return identity.Snapshot{}, err
 	}
 	scopes := indexScopes(&snapshot)
+	loadCasbinFacts(actor.ID, authorization, scopes)
 	if err = loadScopedFacts(ctx, tx, actor.ID, at, scopes); err != nil {
 		return identity.Snapshot{}, err
 	}
-	if err = r.loadExternalGrants(ctx, tx, actor.ID, at, &snapshot); err != nil {
+	if err = r.loadExternalGrants(ctx, tx, actor.ID, at, authorization, &snapshot); err != nil {
 		return identity.Snapshot{}, err
 	}
 	finalizeScopes(scopes)
@@ -94,7 +116,7 @@ func indexScopes(snapshot *identity.Snapshot) map[string]*scopeAccumulator {
 
 func loadScopedFacts(ctx context.Context, tx *sql.Tx, userID string, at time.Time, scopes map[string]*scopeAccumulator) error {
 	loaders := []func(context.Context, *sql.Tx, string, time.Time, map[string]*scopeAccumulator) error{
-		loadRoles, loadGroups, loadPermissions, loadFeatures, loadPlans, loadQuotas,
+		loadFeatures, loadPlans, loadQuotas,
 	}
 	for _, load := range loaders {
 		if err := load(ctx, tx, userID, at, scopes); err != nil {
@@ -109,83 +131,100 @@ const eligibleScopes = `WITH eligible(subject_type,subject_id) AS(
 	SELECT 'organization',organization_id FROM organization_members WHERE user_id=? AND active=1
 ) `
 
-func loadRoles(ctx context.Context, tx *sql.Tx, userID string, at time.Time, scopes map[string]*scopeAccumulator) error {
-	query := eligibleScopes + `SELECT assignment.subject_type,assignment.subject_id,role.name,assignment.effect,role.id
-		FROM role_assignments_v2 assignment JOIN eligible USING(subject_type,subject_id)
-		JOIN roles_v2 role ON role.id=assignment.role_id
-		WHERE assignment.user_id=? AND role.active=1 AND assignment.valid_from<=? AND(assignment.valid_until IS NULL OR assignment.valid_until>?)`
-	return loadNamedFacts(ctx, tx, query, userID, at, scopes, "role_assignment", roleFacts)
-}
-
-func loadGroups(ctx context.Context, tx *sql.Tx, userID string, at time.Time, scopes map[string]*scopeAccumulator) error {
-	query := eligibleScopes + `SELECT group_row.owner_type,group_row.owner_id,group_row.name,membership.effect,group_row.id
-		FROM group_memberships_v2 membership JOIN groups_v2 group_row ON group_row.id=membership.group_id
-		JOIN eligible ON eligible.subject_type=group_row.owner_type AND eligible.subject_id=group_row.owner_id
-		WHERE membership.user_id=? AND group_row.active=1 AND membership.valid_from<=? AND(membership.valid_until IS NULL OR membership.valid_until>?)`
-	return loadNamedFacts(ctx, tx, query, userID, at, scopes, "group_membership", groupFacts)
-}
-
 type factMap func(*scopeAccumulator) map[string]*identity.EffectiveFact
 
-func roleFacts(scope *scopeAccumulator) map[string]*identity.EffectiveFact  { return scope.roles }
-func groupFacts(scope *scopeAccumulator) map[string]*identity.EffectiveFact { return scope.groups }
+type policyOrigin struct{ kind, id string }
 
-func loadNamedFacts(ctx context.Context, tx *sql.Tx, query, userID string, at time.Time, scopes map[string]*scopeAccumulator, sourceType string, selectMap factMap) error {
-	args := []any{userID, userID, userID, stamp(at), stamp(at)}
-	return loadFacts(ctx, tx, query, args, scopes, sourceType, selectMap)
+func loadCasbinFacts(userID string, snapshot security.AuthorizationSnapshot, scopes map[string]*scopeAccumulator) {
+	for key, scope := range scopes {
+		loadCasbinScope(userID, key, snapshot, scope)
+	}
 }
 
-func loadFacts(ctx context.Context, tx *sql.Tx, query string, args []any, scopes map[string]*scopeAccumulator, sourceType string, selectMap factMap) error {
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var subjectType, subjectID, key, effect, sourceID string
-		if err = rows.Scan(&subjectType, &subjectID, &key, &effect, &sourceID); err != nil {
-			return err
-		}
-		if scope := scopes[scopeKey(subjectType, subjectID)]; scope != nil {
-			addFact(selectMap(scope), key, identity.Source{Type: sourceType, ID: sourceID, Effect: effect})
-		}
-	}
-	return rows.Err()
+func loadCasbinScope(userID, key string, snapshot security.AuthorizationSnapshot, scope *scopeAccumulator) {
+	parts := strings.SplitN(key, "\x00", 2)
+	domainID := parts[0] + "::" + parts[1]
+	principal := "user::" + userID
+	origins := collectPolicyOrigins(snapshot.Rules, principal, domainID, userID)
+	addCasbinDirectoryFacts(snapshot, scope, principal, origins)
+	addCasbinPermissionFacts(snapshot.Rules, scope, domainID, origins)
 }
 
-func loadPermissions(ctx context.Context, tx *sql.Tx, userID string, at time.Time, scopes map[string]*scopeAccumulator) error {
-	query := eligibleScopes + `SELECT direct.subject_type,direct.subject_id,direct.permission_id,direct.effect,'direct',direct.permission_id
-		FROM subject_permission_rules_v2 direct JOIN eligible USING(subject_type,subject_id)
-		WHERE direct.user_id=? AND direct.valid_from<=? AND(direct.valid_until IS NULL OR direct.valid_until>?)
-		UNION ALL SELECT assignment.subject_type,assignment.subject_id,rule.permission_id,
-		CASE WHEN assignment.effect='deny' OR rule.effect='deny' THEN 'deny' ELSE 'allow' END,'role',role.id
-		FROM role_assignments_v2 assignment JOIN eligible USING(subject_type,subject_id)
-		JOIN roles_v2 role ON role.id=assignment.role_id JOIN role_permission_rules_v2 rule ON rule.role_id=role.id
-		WHERE assignment.user_id=? AND role.active=1 AND assignment.valid_from<=? AND(assignment.valid_until IS NULL OR assignment.valid_until>?)
-		UNION ALL SELECT group_row.owner_type,group_row.owner_id,permission.permission_id,
-		CASE WHEN membership.effect='deny' OR group_role.effect='deny' OR permission.effect='deny' THEN 'deny' ELSE 'allow' END,'group',group_row.id
-		FROM group_memberships_v2 membership JOIN groups_v2 group_row ON group_row.id=membership.group_id
-		JOIN eligible ON eligible.subject_type=group_row.owner_type AND eligible.subject_id=group_row.owner_id
-		JOIN group_role_rules_v2 group_role ON group_role.group_id=group_row.id JOIN roles_v2 role ON role.id=group_role.role_id
-		JOIN role_permission_rules_v2 permission ON permission.role_id=role.id
-		WHERE membership.user_id=? AND group_row.active=1 AND role.active=1 AND membership.valid_from<=? AND(membership.valid_until IS NULL OR membership.valid_until>?)`
-	now := stamp(at)
-	args := []any{userID, userID, userID, now, now, userID, now, now, userID, now, now}
-	rows, err := tx.QueryContext(ctx, query, args...)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var subjectType, subjectID, key, effect, sourceType, sourceID string
-		if err = rows.Scan(&subjectType, &subjectID, &key, &effect, &sourceType, &sourceID); err != nil {
-			return err
-		}
-		if scope := scopes[scopeKey(subjectType, subjectID)]; scope != nil {
-			addFact(scope.permissions, key, identity.Source{Type: sourceType, ID: sourceID, Effect: effect})
+func collectPolicyOrigins(rules []security.PolicyRule, principal, domainID, userID string) map[string][]policyOrigin {
+	origins := map[string][]policyOrigin{principal: {{kind: "direct", id: userID}}}
+	for changed := true; changed; {
+		changed = false
+		for _, rule := range rules {
+			if rule.PType != "g" || rule.V2 != domainID || len(origins[rule.V0]) == 0 {
+				continue
+			}
+			for _, origin := range propagatedOrigins(rule.V0, rule.V1, origins[rule.V0]) {
+				if !containsOrigin(origins[rule.V1], origin) {
+					origins[rule.V1] = append(origins[rule.V1], origin)
+					changed = true
+				}
+			}
 		}
 	}
-	return rows.Err()
+	return origins
+}
+
+func addCasbinDirectoryFacts(snapshot security.AuthorizationSnapshot, scope *scopeAccumulator, principal string, origins map[string][]policyOrigin) {
+	for candidate, sources := range origins {
+		if candidate == principal {
+			continue
+		}
+		id := strings.TrimPrefix(strings.TrimPrefix(candidate, "role::"), "group::")
+		if strings.HasPrefix(candidate, "role::") {
+			for _, source := range sources {
+				if source.kind == "role" {
+					addFact(scope.roles, directoryName(snapshot.Roles, id), identity.Source{Type: "role_assignment", ID: id, Effect: "allow"})
+				}
+			}
+		}
+		if strings.HasPrefix(candidate, "group::") {
+			addFact(scope.groups, directoryName(snapshot.Groups, id), identity.Source{Type: "group_membership", ID: id, Effect: "allow"})
+		}
+	}
+}
+
+func addCasbinPermissionFacts(rules []security.PolicyRule, scope *scopeAccumulator, domainID string, origins map[string][]policyOrigin) {
+	for _, rule := range rules {
+		if rule.PType != "p" || rule.V1 != domainID || len(origins[rule.V0]) == 0 {
+			continue
+		}
+		for _, source := range origins[rule.V0] {
+			addFact(scope.permissions, rule.V2+"."+rule.V3, identity.Source{Type: source.kind, ID: source.id, Effect: rule.V4})
+		}
+	}
+}
+
+func propagatedOrigins(from, to string, current []policyOrigin) []policyOrigin {
+	if strings.HasPrefix(from, "user::") {
+		id := strings.TrimPrefix(to, "role::")
+		kind := "role"
+		if strings.HasPrefix(to, "group::") {
+			kind, id = "group", strings.TrimPrefix(to, "group::")
+		}
+		return []policyOrigin{{kind: kind, id: id}}
+	}
+	return current
+}
+
+func containsOrigin(values []policyOrigin, candidate policyOrigin) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func directoryName(values map[string]security.DirectoryObject, id string) string {
+	if value := values[id]; value.Name != "" {
+		return value.Name
+	}
+	return id
 }
 
 func loadFeatures(ctx context.Context, tx *sql.Tx, userID string, at time.Time, scopes map[string]*scopeAccumulator) error {

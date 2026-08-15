@@ -2,10 +2,14 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
+
+	security "example.com/phan-quyen-golang/internal/security/domain"
 )
 
 func TestLowValueInvoiceUsesManualReviewStrategy(t *testing.T) {
@@ -87,10 +91,11 @@ func TestInvitationHTTPFlowAssignsOrganizationRole(t *testing.T) {
 	if accepted.Code != http.StatusNoContent {
 		t.Fatalf("accept status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
-	var assigned bool
-	if err := application.Database().QueryRow(`SELECT EXISTS(SELECT 1 FROM role_assignments_v2 WHERE subject_type='organization' AND subject_id='org-a' AND user_id='user-personal' AND role_id='organization:org-a:finance')`).Scan(&assigned); err != nil {
+	snapshot, err := application.directory.Snapshot(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
+	assigned := slices.Contains(snapshot.Rules, security.PolicyRule{PType: "g", V0: "user::user-personal", V1: "role::organization:org-a:finance", V2: "organization::org-a"})
 	if !assigned {
 		t.Fatal("accepted invitation did not assign organization role")
 	}

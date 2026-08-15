@@ -1,36 +1,63 @@
 package delivery
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
-	"fmt"
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
-	"time"
+
+	"example.com/phan-quyen-golang/internal/security/domain"
+	"github.com/gin-gonic/gin"
 )
 
-func TestVerifierRejectsMisleadingAlgorithmHeader(t *testing.T) {
-	verifier := NewVerifier("issuer", "api", "secret")
-	token := signedToken(`{"alg":"none","typ":"JWT"}`, "secret")
-	if _, err := verifier.Verify(token); err == nil {
-		t.Fatal("misleading JWT algorithm was accepted")
+func TestAuthenticationRejectsInvalidToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(NewAuthentication(fakeAuthenticator{err: errors.New("invalid")}, &fakeUsers{}).Middleware())
+	router.GET("/", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("Authorization", "Bearer invalid")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d", response.Code)
 	}
 }
 
-func TestVerifierAcceptsHS256JWTHeader(t *testing.T) {
-	verifier := NewVerifier("issuer", "api", "secret")
-	token := signedToken(`{"alg":"HS256","typ":"JWT"}`, "secret")
-	if _, err := verifier.Verify(token); err != nil {
-		t.Fatalf("valid token rejected: %v", err)
+func TestAuthenticationProjectsUserAndSetsActor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	users := &fakeUsers{}
+	router := gin.New()
+	router.Use(NewAuthentication(fakeAuthenticator{actor: domain.Actor{ID: "user-a", Type: domain.ActorUser}}, users).Middleware())
+	router.GET("/", func(c *gin.Context) {
+		actor, found := Actor(c)
+		if !found || actor.ID != "user-a" {
+			t.Fatalf("actor=%+v found=%v", actor, found)
+		}
+		c.Status(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("Authorization", "Bearer valid")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || users.id != "user-a" {
+		t.Fatalf("status=%d projected=%q", response.Code, users.id)
 	}
 }
 
-func signedToken(header, secret string) string {
-	headerPart := base64.RawURLEncoding.EncodeToString([]byte(header))
-	now := time.Now()
-	claims := fmt.Sprintf(`{"sub":"user","iss":"issuer","aud":"api","exp":%d,"nbf":%d,"actor_type":"user","auth_time":%d}`, now.Add(time.Hour).Unix(), now.Add(-time.Minute).Unix(), now.Unix())
-	payload := base64.RawURLEncoding.EncodeToString([]byte(claims))
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(headerPart + "." + payload))
-	return headerPart + "." + payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+type fakeAuthenticator struct {
+	actor domain.Actor
+	err   error
+}
+
+func (f fakeAuthenticator) Authenticate(context.Context, string) (domain.Actor, error) {
+	return f.actor, f.err
+}
+
+type fakeUsers struct{ id string }
+
+func (f *fakeUsers) EnsureUser(_ context.Context, id string) error {
+	f.id = id
+	return nil
 }

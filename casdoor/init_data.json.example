@@ -1,0 +1,172 @@
+{
+  "organizations": [
+    {
+      "owner": "admin",
+      "name": "identity",
+      "displayName": "Application Identity Realm",
+      "passwordType": "bcrypt",
+      "defaultApplication": "authorization-api",
+      "defaultTokenFormat": "JWT",
+      "mfaRememberInHours": 0
+    }
+  ],
+  "applications": [
+    {
+      "owner": "admin",
+      "name": "authorization-api",
+      "displayName": "Authorization API",
+      "organization": "identity",
+      "cert": "authorization-api-cert",
+      "clientId": "CHANGE_ME_CLIENT_ID",
+      "clientSecret": "CHANGE_ME_CLIENT_SECRET",
+      "enablePassword": true,
+      "enableSignUp": false,
+      "grantTypes": [
+        "authorization_code",
+        "client_credentials",
+        "refresh_token"
+      ],
+      "tokenFormat": "JWT",
+      "redirectUris": [
+        "http://localhost:9000/callback"
+      ]
+    }
+  ],
+  "certs": [
+    {
+      "owner": "admin",
+      "name": "authorization-api-cert",
+      "displayName": "Authorization API signing certificate",
+      "scope": "JWT",
+      "type": "x509",
+      "cryptoAlgorithm": "RS256",
+      "bitSize": 4096,
+      "expireInYears": 20,
+      "certificate": "CHANGE_ME_PUBLIC_CERTIFICATE",
+      "privateKey": "CHANGE_ME_PRIVATE_KEY"
+    }
+  ],
+  "users": [
+    {
+      "owner": "identity",
+      "name": "user-a",
+      "displayName": "User A",
+      "type": "normal-user",
+      "password": "CHANGE_ME_USER_A_PASSWORD",
+      "isForbidden": false,
+      "properties": {
+        "organization_id": "org-a"
+      }
+    },
+    {
+      "owner": "identity",
+      "name": "user-b",
+      "displayName": "User B",
+      "type": "normal-user",
+      "password": "CHANGE_ME_USER_B_PASSWORD",
+      "isForbidden": false,
+      "properties": {
+        "organization_id": "org-b"
+      }
+    },
+    {
+      "owner": "identity",
+      "name": "user-personal",
+      "displayName": "Personal User",
+      "type": "normal-user",
+      "password": "CHANGE_ME_PERSONAL_PASSWORD",
+      "isForbidden": false,
+      "properties": {}
+    }
+  ],
+  "models": [
+    {
+      "owner": "admin",
+      "name": "application-domain-rbac",
+      "displayName": "Application domain RBAC with deny-wins",
+      "modelText": "[request_definition]\nr = sub, dom, obj, act\n\n[policy_definition]\np = sub, dom, obj, act, eft\n\n[role_definition]\ng = _, _, _\n\n[policy_effect]\ne = some(where (p.eft == allow)) && !some(where (p.eft == deny))\n\n[matchers]\nm = (r.sub == p.sub || g(r.sub, p.sub, r.dom)) && r.dom == p.dom && r.obj == p.obj && r.act == p.act"
+    }
+  ],
+  "adapters": [
+    {
+      "owner": "admin",
+      "name": "application-policy-adapter",
+      "table": "application_casbin_rule",
+      "useSameDb": true,
+      "isEnabled": true
+    }
+  ],
+  "enforcers": [
+    {
+      "owner": "admin",
+      "name": "application-enforcer",
+      "displayName": "Application authorization enforcer",
+      "model": "admin/application-domain-rbac",
+      "adapter": "admin/application-policy-adapter",
+      "isEnabled": true
+    }
+  ],
+  "roles": [
+    {
+      "owner": "admin",
+      "name": "organization:org-a:finance",
+      "displayName": "finance-manager",
+      "users": [
+        "identity/user-a"
+      ],
+      "domains": [
+        "organization::org-a"
+      ],
+      "isEnabled": true
+    },
+    {
+      "owner": "admin",
+      "name": "organization:org-b:finance",
+      "displayName": "finance-manager",
+      "users": [
+        "identity/user-b"
+      ],
+      "domains": [
+        "organization::org-b"
+      ],
+      "isEnabled": true
+    }
+  ],
+  "groups": [
+    {
+      "owner": "admin",
+      "name": "organization:org-a:reviewers",
+      "displayName": "reviewers",
+      "type": "Virtual",
+      "isTopGroup": true,
+      "isEnabled": true
+    }
+  ],
+  "permissions": [
+    {
+      "owner": "admin",
+      "name": "app-authorization",
+      "displayName": "Application authorization API",
+      "model": "admin/application-domain-rbac",
+      "adapter": "admin/application-policy-adapter",
+      "resourceType": "Application",
+      "resources": [],
+      "actions": [],
+      "domains": [],
+      "users": [],
+      "roles": [],
+      "groups": [],
+      "effect": "Allow",
+      "isEnabled": true
+    },
+    {"owner":"admin","name":"org-a-invoice-approve","displayName":"Org A invoice approve","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["invoice"],"actions":["approve"],"domains":["organization::org-a"],"roles":["admin/organization:org-a:finance"],"effect":"Allow","isEnabled":true},
+    {"owner":"admin","name":"org-a-membership-review","displayName":"Org A membership review","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["organization_membership"],"actions":["review"],"domains":["organization::org-a"],"roles":["admin/organization:org-a:finance"],"effect":"Allow","isEnabled":true},
+    {"owner":"admin","name":"org-a-membership-invite","displayName":"Org A membership invite","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["organization_membership"],"actions":["invite"],"domains":["organization::org-a"],"roles":["admin/organization:org-a:finance"],"effect":"Allow","isEnabled":true},
+    {"owner":"admin","name":"org-a-external-grant-manage","displayName":"Org A external grant manage","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["external_grant"],"actions":["manage"],"domains":["organization::org-a"],"roles":["admin/organization:org-a:finance"],"effect":"Allow","isEnabled":true},
+    {"owner":"admin","name":"org-b-invoice-approve","displayName":"Org B invoice approve","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["invoice"],"actions":["approve"],"domains":["organization::org-b"],"roles":["admin/organization:org-b:finance"],"effect":"Allow","isEnabled":true},
+    {"owner":"admin","name":"org-b-membership-review","displayName":"Org B membership review","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["organization_membership"],"actions":["review"],"domains":["organization::org-b"],"roles":["admin/organization:org-b:finance"],"effect":"Allow","isEnabled":true},
+    {"owner":"admin","name":"org-b-membership-invite","displayName":"Org B membership invite","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["organization_membership"],"actions":["invite"],"domains":["organization::org-b"],"roles":["admin/organization:org-b:finance"],"effect":"Allow","isEnabled":true},
+    {"owner":"admin","name":"personal-membership-apply","displayName":"Personal membership apply","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["organization_membership"],"actions":["apply"],"domains":["user::user-personal"],"users":["identity/user-personal"],"effect":"Allow","isEnabled":true},
+    {"owner":"admin","name":"personal-membership-accept","displayName":"Personal membership accept","model":"admin/application-domain-rbac","adapter":"admin/application-policy-adapter","resourceType":"Application","resources":["organization_membership"],"actions":["accept"],"domains":["user::user-personal"],"users":["identity/user-personal"],"effect":"Allow","isEnabled":true}
+  ]
+}

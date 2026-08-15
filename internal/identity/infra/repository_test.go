@@ -10,6 +10,7 @@ import (
 	identity "example.com/phan-quyen-golang/internal/identity/domain"
 	identityinfra "example.com/phan-quyen-golang/internal/identity/infra"
 	security "example.com/phan-quyen-golang/internal/security/domain"
+	"example.com/phan-quyen-golang/internal/shared/casdoortest"
 	"example.com/phan-quyen-golang/internal/shared/testutil"
 )
 
@@ -21,9 +22,6 @@ func TestReadSeparatesScopesAndAppliesDenyWins(t *testing.T) {
 		args  []any
 	}{
 		{`INSERT INTO organization_members(id,organization_id,user_id,active,joined_at) VALUES('org-b:user-a','org-b','user-a',1,?)`, []any{now.Add(-time.Hour).Format(time.RFC3339)}},
-		{`INSERT INTO role_assignments_v2(subject_type,subject_id,user_id,role_id,effect,valid_from) VALUES('organization','org-b','user-a','organization:org-b:finance','allow',?)`, []any{now.Add(-time.Hour).Format(time.RFC3339)}},
-		{`INSERT INTO subject_permission_rules_v2(subject_type,subject_id,user_id,permission_id,effect,valid_from) VALUES('organization','org-b','user-a','invoice.approve','deny',?)`, []any{now.Add(-time.Hour).Format(time.RFC3339)}},
-		{`INSERT INTO subject_permission_rules_v2(subject_type,subject_id,user_id,permission_id,effect,valid_from) VALUES('user','user-a','user-a','invoice.approve','allow',?)`, []any{now.Add(-time.Hour).Format(time.RFC3339)}},
 		{`INSERT INTO subject_feature_entitlements_v2(id,subject_type,subject_id,feature_key,effect,source_type,source_id,valid_from) VALUES('org-b-feature-deny','organization','org-b','invoice_management','deny','manual','test',?)`, []any{now.Add(-time.Hour).Format(time.RFC3339)}},
 		{`INSERT INTO subject_quota_entitlements_v2(id,subject_type,subject_id,quota_key,effect,quota_limit,period_start,source_type,source_id) VALUES('user-a-unlimited','user','user-a','invoice_approvals','allow',NULL,?,'manual','test')`, []any{now.Add(-time.Hour).Format(time.RFC3339)}},
 		{`INSERT INTO features_v2(key) VALUES('expired_feature'); INSERT INTO subject_feature_entitlements_v2(id,subject_type,subject_id,feature_key,effect,source_type,source_id,valid_from,valid_until) VALUES('expired-user-feature','user','user-a','expired_feature','allow','manual','test',?,?)`, []any{now.Add(-2 * time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339)}},
@@ -34,7 +32,11 @@ func TestReadSeparatesScopesAndAppliesDenyWins(t *testing.T) {
 		}
 	}
 	insertPlan(t, database, now)
-	snapshot, err := identityinfra.NewRepository(database).Read(context.Background(), security.Actor{ID: "user-a", Type: security.ActorUser}, now)
+	directory := casdoortest.NewFakeCasdoor()
+	directory.AddRule(security.PolicyRule{PType: "g", V0: "user::user-a", V1: "role::organization:org-b:finance", V2: "organization::org-b"})
+	directory.AddRule(security.PolicyRule{PType: "p", V0: "user::user-a", V1: "organization::org-b", V2: "invoice", V3: "approve", V4: "deny"})
+	directory.AddRule(security.PolicyRule{PType: "p", V0: "user::user-a", V1: "user::user-a", V2: "invoice", V3: "approve", V4: "allow"})
+	snapshot, err := identityinfra.NewRepository(database, directory).Read(context.Background(), security.Actor{ID: "user-a", Type: security.ActorUser}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +85,7 @@ func TestReadExternalGrantTargetsFollowMembershipLifecycle(t *testing.T) {
 	insertGrant(t, database, "global", "global_user", "user-b", "", "", now)
 	insertGrant(t, database, "organization", "organization", "", "org-b", "", now)
 	insertGrant(t, database, "member", "organization_member", "user-b", "org-b", membershipID, now)
-	repository := identityinfra.NewRepository(database)
+	repository := identityinfra.NewRepository(database, casdoortest.NewFakeCasdoor())
 	assertGrantIDs(t, read(t, repository, now), "global", "member", "organization")
 	if _, err := database.Exec(`UPDATE organization_members SET active=0,left_at=? WHERE id=?`, now.Format(time.RFC3339), membershipID); err != nil {
 		t.Fatal(err)

@@ -30,6 +30,34 @@ func (r *Repository) CreateInvitation(ctx context.Context, invitation domain.Inv
 	return tx.Commit()
 }
 
+func (r *Repository) LoadInvitation(ctx context.Context, tokenHash, userID string, at time.Time) (domain.Invitation, error) {
+	var invitation domain.Invitation
+	var status, validFrom, validUntil string
+	if err := r.database.QueryRowContext(ctx, `SELECT id,organization_id,user_id,status,valid_from,valid_until FROM organization_invitations_v2 WHERE token_hash=? AND user_id=?`, tokenHash, userID).Scan(&invitation.ID, &invitation.OrganizationID, &invitation.UserID, &status, &validFrom, &validUntil); err != nil {
+		return domain.Invitation{}, err
+	}
+	now := at.UTC().Format(time.RFC3339)
+	if status != "pending" || validFrom > now || validUntil <= now {
+		return domain.Invitation{}, ErrApplicationNotPending
+	}
+	rows, err := r.database.QueryContext(ctx, `SELECT role_id FROM organization_invitation_roles_v2 WHERE invitation_id=? ORDER BY role_id`, invitation.ID)
+	if err != nil {
+		return domain.Invitation{}, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var roleID string
+		if err = rows.Scan(&roleID); err != nil {
+			return domain.Invitation{}, err
+		}
+		invitation.RoleIDs = append(invitation.RoleIDs, roleID)
+	}
+	if err = rows.Err(); err != nil {
+		return domain.Invitation{}, err
+	}
+	return invitation, nil
+}
+
 func (r *Repository) AcceptInvitation(ctx context.Context, tokenHash, userID string, at time.Time) (returnErr error) {
 	tx, err := r.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -49,23 +77,6 @@ func (r *Repository) AcceptInvitation(ctx context.Context, tokenHash, userID str
 		return ErrApplicationNotPending
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO organization_members(id,organization_id,user_id,active,joined_at) VALUES(?,?,?,1,?)`, "invitation:"+invitationID, organizationID, userID, time.Now().UTC().Format(time.RFC3339)); err != nil {
-		return err
-	}
-	roles, err := tx.QueryContext(ctx, `SELECT role_id FROM organization_invitation_roles_v2 WHERE invitation_id=?`, invitationID)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = roles.Close() }()
-	for roles.Next() {
-		var roleID string
-		if err := roles.Scan(&roleID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO role_assignments_v2(subject_type,subject_id,user_id,role_id,effect,valid_from) VALUES('organization',?,?,?,'allow',?)`, organizationID, userID, roleID, now); err != nil {
-			return err
-		}
-	}
-	if err := roles.Err(); err != nil {
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE organization_invitations_v2 SET status='accepted',accepted_at=? WHERE id=? AND status='pending'`, now, invitationID)

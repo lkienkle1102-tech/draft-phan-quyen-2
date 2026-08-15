@@ -26,11 +26,20 @@ import (
 )
 
 type App struct {
-	database *sql.DB
-	router   http.Handler
+	database  *sql.DB
+	router    http.Handler
+	directory securityapp.AuthorizationDirectory
 }
 
 func New(cfg config.Config) (*App, error) {
+	casdoor, err := securityinfra.NewCasdoor(cfg.Casdoor)
+	if err != nil {
+		return nil, err
+	}
+	return newApp(cfg, casdoor, casdoor, casdoor)
+}
+
+func newApp(cfg config.Config, authenticator securityapp.Authenticator, permissions securityapp.PermissionEnforcer, directory securityapp.AuthorizationDirectory) (*App, error) {
 	db, err := sqlite.Open(cfg.DatabasePath)
 	if err != nil {
 		return nil, err
@@ -38,8 +47,12 @@ func New(cfg config.Config) (*App, error) {
 	if err := Migrate(db); err != nil {
 		return nil, errors.Join(err, db.Close())
 	}
-	repository := securityinfra.NewRepository(db)
-	resolver := securityapp.NewEndpointResolver(repository,
+	repository := securityinfra.NewRepository(db, directory)
+	catalog, err := securityCatalog()
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
+	}
+	resolver := securityapp.NewEndpointResolver(catalog,
 		map[string]securityapp.ResourceLoader{
 			"me":                   identitydelivery.MeLoader{},
 			"invoice":              invoicedelivery.NewResourceLoader(db),
@@ -59,15 +72,15 @@ func New(cfg config.Config) (*App, error) {
 			"external-grant-manage": securitydelivery.ExternalGrantManageIntent{},
 		},
 	)
-	authentication := securitydelivery.NewAuthentication(securitydelivery.NewVerifier(cfg.JWTIssuer, cfg.JWTAudience, cfg.JWTSecret), repository)
-	authorizer := securityapp.NewEngine(securityapp.NewHardEngine(repository), securityapp.NewSoftEngine(repository, repository))
+	authentication := securitydelivery.NewAuthentication(authenticator, repository)
+	authorizer := securityapp.NewEngine(securityapp.NewHardEngine(repository), permissions, repository)
 	authorization := securitydelivery.NewAuthorization(authorizer, repository)
 	store := invoiceinfra.NewStore(db)
 	handler := invoicedelivery.NewHandler(invoicapp.NewApproveService(store, store, store))
 	membershipRepository := membershipinfra.NewRepository(db)
-	membershipHandler := membershipdelivery.NewHandler(membershipapp.NewService(membershipRepository), membershipapp.NewInvitationService(membershipRepository))
-	externalGrantHandler := securitydelivery.NewExternalGrantHandler(securityapp.NewExternalGrantService(repository, repository))
-	identityHandler := identitydelivery.NewHandler(identityapp.NewService(identityinfra.NewRepository(db)))
+	membershipHandler := membershipdelivery.NewHandler(membershipapp.NewService(membershipRepository), membershipapp.NewInvitationService(membershipRepository, directory))
+	externalGrantHandler := securitydelivery.NewExternalGrantHandler(securityapp.NewExternalGrantService(repository, permissions, directory, repository))
+	identityHandler := identitydelivery.NewHandler(identityapp.NewService(identityinfra.NewRepository(db, directory)))
 	router := gin.New()
 	router.Use(gin.Recovery())
 	protected := router.Group("/v1")
@@ -76,7 +89,7 @@ func New(cfg config.Config) (*App, error) {
 	membershipdelivery.RegisterRoutes(protected, membershipdelivery.RouteDependencies{Guard: authorization.Enforce, Handler: membershipHandler})
 	securitydelivery.RegisterExternalGrantRoutes(protected, authorization.Enforce, externalGrantHandler)
 	identitydelivery.RegisterRoutes(protected, authorization.Enforce, identityHandler)
-	return &App{database: db, router: router}, nil
+	return &App{database: db, router: router, directory: directory}, nil
 }
 
 func (a *App) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

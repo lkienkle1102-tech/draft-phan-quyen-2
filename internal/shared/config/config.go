@@ -1,7 +1,10 @@
 // Package config loads application configuration from the process environment.
 package config
 
-import "os"
+import (
+	"os"
+	"time"
+)
 
 const defaultDatabasePath = "phan-quyen.db"
 const defaultHTTPAddress = ":8080"
@@ -9,10 +12,16 @@ const defaultHTTPAddress = ":8080"
 // Config contains the application runtime configuration.
 type Config struct {
 	DatabasePath string
-	JWTIssuer    string
-	JWTAudience  string
-	JWTSecret    string
 	HTTPAddress  string
+	Casdoor      Casdoor
+}
+
+type Casdoor struct {
+	Endpoint, ClientID, ClientSecret, Certificate string
+	Organization, Application                     string
+	PermissionID, ModelID, ResourceID             string
+	EnforcerID, Owner                             string
+	HTTPTimeout                                   time.Duration
 }
 
 // Load reads application configuration from the process environment.
@@ -22,7 +31,24 @@ func Load() Config {
 		databasePath = defaultDatabasePath
 	}
 
-	return Config{DatabasePath: databasePath, JWTIssuer: value("JWT_ISSUER", "phan-quyen"), JWTAudience: value("JWT_AUDIENCE", "api"), JWTSecret: value("JWT_SECRET", "development-secret-change-me"), HTTPAddress: value("HTTP_ADDRESS", defaultHTTPAddress)}
+	return Config{
+		DatabasePath: databasePath,
+		HTTPAddress:  value("HTTP_ADDRESS", defaultHTTPAddress),
+		Casdoor: Casdoor{
+			Endpoint:     value("CASDOOR_ENDPOINT", "http://localhost:8000"),
+			ClientID:     os.Getenv("CASDOOR_CLIENT_ID"),
+			ClientSecret: os.Getenv("CASDOOR_CLIENT_SECRET"),
+			Certificate:  os.Getenv("CASDOOR_CERTIFICATE"),
+			Organization: value("CASDOOR_ORGANIZATION", "identity"),
+			Application:  value("CASDOOR_APPLICATION", "authorization-api"),
+			PermissionID: value("CASDOOR_PERMISSION_ID", "app-authorization"),
+			ModelID:      value("CASDOOR_MODEL_ID", "application-domain-rbac"),
+			ResourceID:   value("CASDOOR_RESOURCE_ID", "application-policy-adapter"),
+			EnforcerID:   value("CASDOOR_ENFORCER_ID", "application-enforcer"),
+			Owner:        value("CASDOOR_OWNER", "admin"),
+			HTTPTimeout:  3 * time.Second,
+		},
+	}
 }
 
 func value(key, fallback string) string {

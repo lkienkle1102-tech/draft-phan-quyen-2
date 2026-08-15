@@ -7,6 +7,7 @@ import (
 
 	"example.com/phan-quyen-golang/internal/security/domain"
 	"example.com/phan-quyen-golang/internal/security/infra"
+	"example.com/phan-quyen-golang/internal/shared/casdoortest"
 	sharedquota "example.com/phan-quyen-golang/internal/shared/quota"
 	"example.com/phan-quyen-golang/internal/shared/testutil"
 )
@@ -14,7 +15,7 @@ import (
 func TestExternalGrantTargetsHaveDifferentKickAndRejoinSemantics(t *testing.T) {
 	database := testutil.Database(t)
 	repository := infra.NewRepository(database)
-	if _, err := database.Exec(`INSERT INTO users(id,organization_id,active) VALUES('external-user',NULL,1); INSERT INTO organization_members(id,organization_id,user_id,active) VALUES('member-old','org-b','external-user',1)`); err != nil {
+	if _, err := database.Exec(`INSERT INTO users(id) VALUES('external-user'); INSERT INTO organization_members(id,organization_id,user_id,active) VALUES('member-old','org-b','external-user',1)`); err != nil {
 		t.Fatal(err)
 	}
 	resource := domain.Resource{Type: "invoice", ID: "invoice-partner", TenantID: "org-a"}
@@ -36,6 +37,37 @@ func TestExternalGrantTargetsHaveDifferentKickAndRejoinSemantics(t *testing.T) {
 	}
 	access = resolveExternal(t, repository, actor, resource, operation, now.Add(2*time.Minute))
 	assertGrantIDs(t, access, "global", "organization")
+}
+
+func TestExternalRoleAndGroupPermissionsUseCasbinSnapshotWithDenyWins(t *testing.T) {
+	database := testutil.Database(t)
+	directory := casdoortest.NewFakeCasdoor()
+	directory.AddGroup(domain.DirectoryObject{ID: "organization:org-a:reviewers", Name: "reviewers", Domains: []string{"organization::org-a"}})
+	directory.AddRule(domain.PolicyRule{PType: "g", V0: "group::organization:org-a:reviewers", V1: "role::organization:org-a:finance", V2: "organization::org-a"})
+	repository := infra.NewRepository(database, directory)
+	now := time.Now().UTC()
+	target := domain.ExternalGrantTarget{Type: domain.ExternalTargetGlobalUser, UserID: "user-personal"}
+	roleGrant := externalDefinition("role-allow", target, now)
+	roleGrant.Permissions = nil
+	roleGrant.Roles = []domain.ExternalGrantItem{{Key: "organization:org-a:finance", Effect: domain.EffectAllow}}
+	createGrant(t, repository, roleGrant)
+	access := resolveExternal(t, repository, domain.Actor{ID: "user-personal", Type: domain.ActorUser}, roleGrant.Resource, roleGrant.Operation, now)
+	allowed, err := repository.ExternalPermission(context.Background(), *access, roleGrant.Operation)
+	if err != nil || !allowed {
+		t.Fatalf("role-derived allowed=%v err=%v", allowed, err)
+	}
+	groupGrant := externalDefinition("group-deny", target, now)
+	groupGrant.Permissions = nil
+	groupGrant.Groups = []domain.ExternalGrantItem{{Key: "organization:org-a:reviewers", Effect: domain.EffectDeny}}
+	createGrant(t, repository, groupGrant)
+	access = resolveExternal(t, repository, domain.Actor{ID: "user-personal", Type: domain.ActorUser}, roleGrant.Resource, roleGrant.Operation, now)
+	allowed, err = repository.ExternalPermission(context.Background(), *access, roleGrant.Operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("group-derived deny must win over role-derived allow")
+	}
 }
 
 func TestExternalGrantDenyWinsAcrossMatchingGrants(t *testing.T) {

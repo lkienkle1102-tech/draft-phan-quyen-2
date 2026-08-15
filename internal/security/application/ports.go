@@ -8,12 +8,21 @@ import (
 	"example.com/phan-quyen-golang/internal/security/domain"
 )
 
+type Authenticator interface {
+	Authenticate(context.Context, string) (domain.Actor, error)
+}
+
+type UserProjection interface {
+	EnsureUser(context.Context, string) error
+}
+
 type EndpointBinding struct {
 	ID, Method, Route, Loader, Intent string
 	Operation                         domain.Operation
 	PolicyID                          string
 	PolicyVersion                     int64
 	ScopeMode                         domain.ScopeMode
+	Requirement                       domain.Requirement
 }
 
 type EndpointInput struct {
@@ -36,25 +45,18 @@ type ResourceLoader interface {
 type IntentResolver interface {
 	Resolve(context.Context, EndpointInput) (domain.Operation, error)
 }
-type PolicyRepository interface {
-	LoadPolicy(context.Context, string, int64) (domain.Policy, error)
-}
-
-type Facts interface {
-	ActorActive(context.Context, domain.Actor) (bool, error)
-	HasPermission(context.Context, domain.Actor, domain.Subject, domain.Operation) (bool, error)
-	HasRole(context.Context, domain.Actor, domain.Subject, string) (bool, error)
-	InGroup(context.Context, domain.Actor, domain.Subject, string) (bool, error)
+type BusinessFacts interface {
 	IsMember(context.Context, domain.Actor, domain.Subject) (bool, error)
-	HasClientGrant(context.Context, domain.Actor, domain.Subject, domain.Operation) (bool, error)
-	HasConsent(context.Context, domain.Actor, domain.Subject, domain.Operation) (bool, error)
 	HasFeature(context.Context, domain.Subject, string) (bool, error)
 	HasPlan(context.Context, domain.Subject, string) (bool, error)
 	QuotaAvailable(context.Context, domain.Subject, string, int64) (bool, error)
-	FindGrant(context.Context, domain.GrantRequest) (domain.OrganizationGrant, bool, error)
-	DelegatedFeature(context.Context, string, string) (bool, error)
-	DelegatedQuota(context.Context, string, string, int64) (bool, error)
 }
+
+type PermissionEnforcer interface {
+	Enforce(context.Context, domain.Actor, domain.Subject, domain.Operation) (bool, error)
+}
+
+type AuthorizationDirectory = domain.AuthorizationDirectory
 
 type ExternalFacts interface {
 	ResolveExternalAccess(context.Context, domain.Actor, domain.Resource, domain.Operation, time.Time) (*domain.ExternalAccess, error)

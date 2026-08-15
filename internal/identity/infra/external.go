@@ -6,9 +6,10 @@ import (
 	"time"
 
 	identity "example.com/phan-quyen-golang/internal/identity/domain"
+	security "example.com/phan-quyen-golang/internal/security/domain"
 )
 
-func (r *Repository) loadExternalGrants(ctx context.Context, tx *sql.Tx, userID string, at time.Time, snapshot *identity.Snapshot) error {
+func (r *Repository) loadExternalGrants(ctx context.Context, tx *sql.Tx, userID string, at time.Time, authorization security.AuthorizationSnapshot, snapshot *identity.Snapshot) error {
 	rows, err := tx.QueryContext(ctx, `SELECT grant_row.id,grant_row.owner_organization_id,owner.name,grant_row.target_type,
 		COALESCE(grant_row.target_user_id,''),COALESCE(grant_row.target_organization_id,''),COALESCE(grant_row.target_membership_id,''),
 		grant_row.resource_type,COALESCE(grant_row.resource_id,''),grant_row.action,grant_row.effect,grant_row.valid_from,grant_row.valid_until
@@ -40,18 +41,20 @@ func (r *Repository) loadExternalGrants(ctx context.Context, tx *sql.Tx, userID 
 	if err = rows.Err(); err != nil || len(snapshot.ExternalGrants) == 0 {
 		return err
 	}
-	return loadExternalBundles(ctx, tx, snapshot.ExternalGrants)
+	return loadExternalBundles(ctx, tx, authorization, snapshot.ExternalGrants)
 }
 
-func loadExternalBundles(ctx context.Context, tx *sql.Tx, grants []identity.ExternalGrant) error {
+func loadExternalBundles(ctx context.Context, tx *sql.Tx, authorization security.AuthorizationSnapshot, grants []identity.ExternalGrant) error {
 	indexes := make(map[string]*scopeAccumulator, len(grants))
+	domains := make(map[string]string, len(grants))
 	args := make([]any, 0, len(grants))
 	for index := range grants {
 		indexes[grants[index].ID] = newScopeAccumulator(&grants[index].Entitlements)
+		domains[grants[index].ID] = "organization::" + grants[index].OwnerOrganizationID
 		args = append(args, grants[index].ID)
 	}
 	clause := placeholders(len(args))
-	if err := loadExternalFacts(ctx, tx, clause, args, indexes); err != nil {
+	if err := loadExternalFacts(ctx, tx, clause, args, authorization, domains, indexes); err != nil {
 		return err
 	}
 	if err := loadExternalPlans(ctx, tx, clause, args, indexes); err != nil {
@@ -64,14 +67,12 @@ func loadExternalBundles(ctx context.Context, tx *sql.Tx, grants []identity.Exte
 	return nil
 }
 
-func loadExternalFacts(ctx context.Context, tx *sql.Tx, clause string, args []any, scopes map[string]*scopeAccumulator) error {
+func loadExternalFacts(ctx context.Context, tx *sql.Tx, clause string, args []any, authorization security.AuthorizationSnapshot, domains map[string]string, scopes map[string]*scopeAccumulator) error {
 	queries := []struct {
 		query, sourceType string
 		selectMap         factMap
 	}{
 		{`SELECT item.grant_id,item.permission_id,item.effect,item.permission_id FROM external_grant_permissions_v2 item WHERE item.grant_id IN (` + clause + `)`, "direct", func(scope *scopeAccumulator) map[string]*identity.EffectiveFact { return scope.permissions }},
-		{`SELECT item.grant_id,role.name,item.effect,role.id FROM external_grant_roles_v2 item JOIN roles_v2 role ON role.id=item.role_id WHERE item.grant_id IN (` + clause + `)`, "role", func(scope *scopeAccumulator) map[string]*identity.EffectiveFact { return scope.roles }},
-		{`SELECT item.grant_id,group_row.name,item.effect,group_row.id FROM external_grant_groups_v2 item JOIN groups_v2 group_row ON group_row.id=item.group_id WHERE item.grant_id IN (` + clause + `)`, "group", func(scope *scopeAccumulator) map[string]*identity.EffectiveFact { return scope.groups }},
 		{`SELECT item.grant_id,item.feature_key,item.effect,item.source_type||':'||item.source_id FROM external_grant_features_v2 item WHERE item.grant_id IN (` + clause + `)`, "feature", func(scope *scopeAccumulator) map[string]*identity.EffectiveFact { return scope.features }},
 	}
 	for _, item := range queries {
@@ -79,7 +80,10 @@ func loadExternalFacts(ctx context.Context, tx *sql.Tx, clause string, args []an
 			return err
 		}
 	}
-	return loadExternalDerivedPermissions(ctx, tx, clause, args, scopes)
+	if err := loadExternalDirectoryFacts(ctx, tx, clause, args, authorization, domains, scopes, "role"); err != nil {
+		return err
+	}
+	return loadExternalDirectoryFacts(ctx, tx, clause, args, authorization, domains, scopes, "group")
 }
 
 func loadExternalFactRows(ctx context.Context, tx *sql.Tx, query string, args []any, scopes map[string]*scopeAccumulator, sourceType string, selectMap factMap) error {
@@ -98,26 +102,40 @@ func loadExternalFactRows(ctx context.Context, tx *sql.Tx, query string, args []
 	return rows.Err()
 }
 
-func loadExternalDerivedPermissions(ctx context.Context, tx *sql.Tx, clause string, args []any, scopes map[string]*scopeAccumulator) error {
-	query := `SELECT item.grant_id,permission.permission_id,CASE WHEN item.effect='deny' OR permission.effect='deny' THEN 'deny' ELSE 'allow' END,'role',role.id
-		FROM external_grant_roles_v2 item JOIN roles_v2 role ON role.id=item.role_id JOIN role_permission_rules_v2 permission ON permission.role_id=role.id WHERE item.grant_id IN (` + clause + `)
-		UNION ALL SELECT item.grant_id,permission.permission_id,CASE WHEN item.effect='deny' OR group_role.effect='deny' OR permission.effect='deny' THEN 'deny' ELSE 'allow' END,'group',group_row.id
-		FROM external_grant_groups_v2 item JOIN groups_v2 group_row ON group_row.id=item.group_id JOIN group_role_rules_v2 group_role ON group_role.group_id=group_row.id JOIN role_permission_rules_v2 permission ON permission.role_id=group_role.role_id WHERE item.grant_id IN (` + clause + `)`
-	combined := append(append([]any(nil), args...), args...)
-	rows, err := tx.QueryContext(ctx, query, combined...)
+func loadExternalDirectoryFacts(ctx context.Context, tx *sql.Tx, clause string, args []any, authorization security.AuthorizationSnapshot, domains map[string]string, scopes map[string]*scopeAccumulator, kind string) error {
+	column, table := "role_id", "external_grant_roles_v2"
+	directory := authorization.Roles
+	if kind == "group" {
+		column, table, directory = "group_id", "external_grant_groups_v2", authorization.Groups
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT grant_id,`+column+`,effect FROM `+table+` WHERE grant_id IN (`+clause+`)`, args...)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
-		var grantID, key string
-		var source identity.Source
-		if err = rows.Scan(&grantID, &key, &source.Effect, &source.Type, &source.ID); err != nil {
+		var grantID, id, itemEffect string
+		if err = rows.Scan(&grantID, &id, &itemEffect); err != nil {
 			return err
 		}
-		addFact(scopes[grantID].permissions, key, source)
+		addFact(mapForDirectoryKind(scopes[grantID], kind), directoryName(directory, id), identity.Source{Type: kind, ID: id, Effect: itemEffect})
+		principal := kind + "::" + id
+		for _, policy := range security.PoliciesForPrincipal(authorization.Rules, principal, domains[grantID]) {
+			effect := policy.V4
+			if itemEffect == "deny" {
+				effect = "deny"
+			}
+			addFact(scopes[grantID].permissions, policy.V2+"."+policy.V3, identity.Source{Type: kind, ID: id, Effect: effect})
+		}
 	}
 	return rows.Err()
+}
+
+func mapForDirectoryKind(scope *scopeAccumulator, kind string) map[string]*identity.EffectiveFact {
+	if kind == "group" {
+		return scope.groups
+	}
+	return scope.roles
 }
 
 func loadExternalPlans(ctx context.Context, tx *sql.Tx, clause string, args []any, scopes map[string]*scopeAccumulator) error {

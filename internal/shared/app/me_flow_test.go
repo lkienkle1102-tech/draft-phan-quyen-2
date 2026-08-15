@@ -27,9 +27,6 @@ type meResponse struct {
 
 func TestMeReturnsScopeSeparatedSnapshot(t *testing.T) {
 	application := newTestApp(t, "me.sqlite")
-	if _, err := application.Database().Exec(`INSERT INTO subject_permission_rules_v2(subject_type,subject_id,user_id,permission_id,effect,valid_from) VALUES('user','user-a','user-a','identity.read_self','allow','1970-01-01T00:00:00Z')`); err != nil {
-		t.Fatal(err)
-	}
 	response := membershipRequest(application, http.MethodGet, "/v1/me", token(t, "user-a", "org-a", time.Now().UTC()), nil)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -74,9 +71,6 @@ func TestMeRejectsInvalidAndMachineActors(t *testing.T) {
 	response := membershipRequest(application, http.MethodGet, "/v1/me", "invalid", nil)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid token status=%d", response.Code)
-	}
-	if _, err := application.Database().Exec(`INSERT INTO oauth_clients(id,organization_id,active) VALUES('client-me','org-a',1)`); err != nil {
-		t.Fatal(err)
 	}
 	machine := actorToken(t, "machine-subject", "org-a", time.Now().UTC(), "machine", "client-me")
 	response = membershipRequest(application, http.MethodGet, "/v1/me", machine, nil)

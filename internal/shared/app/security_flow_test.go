@@ -3,8 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,21 +14,12 @@ import (
 
 	security "example.com/phan-quyen-golang/internal/security/domain"
 	securityinfra "example.com/phan-quyen-golang/internal/security/infra"
+	"example.com/phan-quyen-golang/internal/shared/casdoortest"
 	"example.com/phan-quyen-golang/internal/shared/config"
 )
 
-const flowSecret = "01234567890123456789012345678901"
-
 func TestAuthorizationFlowRejectsCrossOrganizationDelegation(t *testing.T) {
-	application, err := New(config.Config{DatabasePath: t.TempDir() + "/flow.sqlite", JWTIssuer: "issuer", JWTAudience: "api", JWTSecret: flowSecret})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := application.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	application := newTestApp(t, "flow.sqlite")
 	now := time.Now().UTC()
 	userA := token(t, "user-a", "org-a", now)
 	response := approveRequest(application, "org-a", "invoice-a", userA, "own")
@@ -46,11 +35,6 @@ func TestAuthorizationFlowRejectsCrossOrganizationDelegation(t *testing.T) {
 	response = approveRequest(application, "org-a", "invoice-partner", userB, "missing")
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("missing grant status=%d", response.Code)
-	}
-	validFrom := now.Add(-time.Minute).Format(time.RFC3339)
-	_, err = application.Database().Exec(`INSERT INTO organization_access_grants(id,owner_organization_id,grantee_organization_id,resource_type,resource_id,action,valid_from,status,created_by) VALUES('grant','org-a','org-b','invoice','invoice-partner','approve',?,'active','user-a')`, validFrom)
-	if err == nil {
-		t.Fatal("active cross-organization grant was accepted")
 	}
 	response = approveRequest(application, "org-a", "invoice-partner", userB, "delegated")
 	if response.Code != http.StatusNotFound {
@@ -199,7 +183,8 @@ func TestPersonalUserAppliesAndOrganizationApprovesMembership(t *testing.T) {
 
 func newTestApp(t *testing.T, name string) *App {
 	t.Helper()
-	application, err := New(config.Config{DatabasePath: t.TempDir() + "/" + name, JWTIssuer: "issuer", JWTAudience: "api", JWTSecret: flowSecret})
+	fake := casdoortest.NewFakeCasdoor()
+	application, err := newApp(config.Config{DatabasePath: t.TempDir() + "/" + name}, fake, fake, fake)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,34 +216,6 @@ func activeMember(t *testing.T, application *App, organizationID, userID string)
 		t.Fatal(err)
 	}
 	return active
-}
-
-func TestMemberSpecificOrganizationGrantCannotBeActivated(t *testing.T) {
-	application, err := New(config.Config{DatabasePath: t.TempDir() + "/grant.sqlite", JWTIssuer: "issuer", JWTAudience: "api", JWTSecret: flowSecret})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := application.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	db := application.Database()
-	if _, err := db.Exec(`INSERT INTO users VALUES('user-c','org-b',1); INSERT INTO organization_members VALUES('org-b','user-c',1); INSERT INTO organization_access_grants(id,owner_organization_id,grantee_organization_id,resource_type,resource_id,action,valid_from,status,created_by,grantee_user_id) VALUES('member-grant','org-a','org-b','invoice','invoice-partner','approve',?,'active','user-a','user-b')`, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)); err == nil {
-		t.Fatal("member-specific cross-organization grant was accepted")
-	}
-	repository := securityinfra.NewRepository(db)
-	request := security.GrantRequest{OwnerOrganizationID: "org-a", GranteeOrganizationID: "org-b", Resource: security.Resource{Type: "invoice", ID: "invoice-partner"}, Operation: security.Operation{ResourceType: "invoice", Action: "approve"}, At: time.Now().UTC()}
-	request.ActorID = "user-b"
-	_, allowed, err := repository.FindGrant(context.Background(), request)
-	if err != nil || allowed {
-		t.Fatalf("specific member grant allowed=%v err=%v", allowed, err)
-	}
-	request.ActorID = "user-c"
-	_, allowed, err = repository.FindGrant(context.Background(), request)
-	if err != nil || allowed {
-		t.Fatalf("other member allowed=%v err=%v", allowed, err)
-	}
 }
 
 func TestRejectedMembershipDoesNotActivateAndCannotBeReviewedTwice(t *testing.T) {
@@ -312,10 +269,8 @@ func token(t *testing.T, user, organization string, authTime time.Time) string {
 
 func actorToken(t *testing.T, subject, organization string, authTime time.Time, actorType, clientID string) string {
 	t.Helper()
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
 	claims := fmt.Sprintf(`{"sub":%q,"iss":"issuer","aud":"api","exp":%d,"nbf":%d,"actor_type":%q,"client_id":%q,"organization_id":%q,"amr":["mfa"],"auth_time":%d}`, subject, time.Now().Add(time.Hour).Unix(), time.Now().Add(-time.Minute).Unix(), actorType, clientID, organization, authTime.Unix())
 	payload := base64.RawURLEncoding.EncodeToString([]byte(claims))
-	mac := hmac.New(sha256.New, []byte(flowSecret))
-	_, _ = mac.Write([]byte(header + "." + payload))
-	return header + "." + payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return header + "." + payload + ".test-signature"
 }

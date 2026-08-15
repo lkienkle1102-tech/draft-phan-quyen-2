@@ -50,6 +50,27 @@ type Subject struct {
 }
 type Operation struct{ ResourceType, Action string }
 
+// Requirement describes the endpoint-specific checks that remain after the
+// invariant hard-contract checks have succeeded.
+type Requirement struct {
+	RequirePermission bool
+	RequireSelf       bool
+	FeatureKey        string
+	QuotaKey          string
+	QuotaCost         int64
+	Behavior          *BehaviorRequirement
+}
+
+// BehaviorRequirement describes deterministic decision enrichment. It does
+// not grant access; it only selects a handler strategy after all checks pass.
+type BehaviorRequirement struct {
+	Attribute   string
+	Maximum     int64
+	Strategy    string
+	Parameters  map[string]Value
+	Obligations []Obligation
+}
+
 type Resource struct {
 	Type, ID, TenantID, OwnerID string
 	System                      bool
@@ -86,6 +107,7 @@ type Request struct {
 	Now                                      time.Time
 	PolicyID                                 string
 	PolicyVersion                            int64
+	Requirement                              Requirement
 	Grant                                    *OrganizationGrant
 	ExternalAccess                           *ExternalAccess
 	ScopeMode                                ScopeMode

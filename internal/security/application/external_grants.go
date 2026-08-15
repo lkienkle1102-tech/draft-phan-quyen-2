@@ -10,6 +10,7 @@ import (
 
 var ErrInvalidExternalGrant = errors.New("invalid external grant")
 var ErrExternalGrantForbidden = errors.New("external grant management forbidden")
+var ErrGrantEscalation = errors.New("organization grant exceeds owner entitlements")
 
 type ExternalGrantStore interface {
 	CreateExternalGrant(context.Context, domain.ExternalGrantDefinition) error
@@ -30,7 +31,7 @@ func (s *ExternalGrantService) List(ctx context.Context, owner, actor string) ([
 	if !member {
 		return nil, ErrExternalGrantForbidden
 	}
-	allowed, err := s.facts.HasPermission(ctx, a, subject, domain.Operation{ResourceType: "external_grant", Action: "manage"})
+	allowed, err := s.permissions.Enforce(ctx, a, subject, domain.Operation{ResourceType: "external_grant", Action: "manage"})
 	if err != nil {
 		return nil, err
 	}
@@ -41,12 +42,14 @@ func (s *ExternalGrantService) List(ctx context.Context, owner, actor string) ([
 }
 
 type ExternalGrantService struct {
-	facts Facts
-	store ExternalGrantStore
+	facts       BusinessFacts
+	permissions PermissionEnforcer
+	directory   AuthorizationDirectory
+	store       ExternalGrantStore
 }
 
-func NewExternalGrantService(f Facts, s ExternalGrantStore) *ExternalGrantService {
-	return &ExternalGrantService{facts: f, store: s}
+func NewExternalGrantService(f BusinessFacts, permissions PermissionEnforcer, directory AuthorizationDirectory, s ExternalGrantStore) *ExternalGrantService {
+	return &ExternalGrantService{facts: f, permissions: permissions, directory: directory, store: s}
 }
 
 func (s *ExternalGrantService) Create(ctx context.Context, definition domain.ExternalGrantDefinition) error {
@@ -61,6 +64,12 @@ func (s *ExternalGrantService) Create(ctx context.Context, definition domain.Ext
 	if err := s.checkPermissions(ctx, actor, owner, definition.Permissions); err != nil {
 		return err
 	}
+	if err := s.directory.ValidateRoles(ctx, owner, itemKeys(definition.Roles)); err != nil {
+		return errors.Join(ErrInvalidExternalGrant, err)
+	}
+	if err := s.directory.ValidateGroups(ctx, owner, itemKeys(definition.Groups)); err != nil {
+		return errors.Join(ErrInvalidExternalGrant, err)
+	}
 	if err := checkExternalNamed(ctx, owner, definition.Features, s.facts.HasFeature); err != nil {
 		return err
 	}
@@ -73,6 +82,14 @@ func (s *ExternalGrantService) Create(ctx context.Context, definition domain.Ext
 	return s.store.CreateExternalGrant(ctx, definition)
 }
 
+func itemKeys(items []domain.ExternalGrantItem) []string {
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		result = append(result, item.Key)
+	}
+	return result
+}
+
 func (s *ExternalGrantService) requireManager(ctx context.Context, actor domain.Actor, owner domain.Subject) error {
 	member, err := s.facts.IsMember(ctx, actor, owner)
 	if err != nil {
@@ -81,7 +98,7 @@ func (s *ExternalGrantService) requireManager(ctx context.Context, actor domain.
 	if !member {
 		return ErrExternalGrantForbidden
 	}
-	allowed, err := s.facts.HasPermission(ctx, actor, owner, domain.Operation{ResourceType: "external_grant", Action: "manage"})
+	allowed, err := s.permissions.Enforce(ctx, actor, owner, domain.Operation{ResourceType: "external_grant", Action: "manage"})
 	if err != nil {
 		return err
 	}
@@ -103,7 +120,7 @@ func (s *ExternalGrantService) checkPermissions(ctx context.Context, actor domai
 		if loadErr != nil {
 			return loadErr
 		}
-		owned, loadErr := s.facts.HasPermission(ctx, actor, owner, operation)
+		owned, loadErr := s.permissions.Enforce(ctx, actor, owner, operation)
 		if loadErr != nil {
 			return loadErr
 		}
@@ -154,7 +171,7 @@ func (s *ExternalGrantService) Revoke(ctx context.Context, owner, grant, actor s
 	if !member {
 		return ErrExternalGrantForbidden
 	}
-	allowed, err := s.facts.HasPermission(ctx, a, subject, domain.Operation{ResourceType: "external_grant", Action: "manage"})
+	allowed, err := s.permissions.Enforce(ctx, a, subject, domain.Operation{ResourceType: "external_grant", Action: "manage"})
 	if err != nil {
 		return err
 	}

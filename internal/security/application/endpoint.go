@@ -46,7 +46,7 @@ func (r *EndpointResolver) Resolve(ctx context.Context, method, route string, in
 	if err != nil {
 		return domain.Request{}, err
 	}
-	return domain.Request{Method: method, RouteTemplate: route, EndpointBindingID: binding.ID, Actor: input.Actor, Subject: subject, TenantID: subject.ID, Primary: resources.Primary, Related: resources.Related, Operation: operation, Now: time.Now().UTC(), PolicyID: binding.PolicyID, PolicyVersion: binding.PolicyVersion, ScopeMode: binding.ScopeMode}, nil
+	return domain.Request{Method: method, RouteTemplate: route, EndpointBindingID: binding.ID, Actor: input.Actor, Subject: subject, TenantID: subject.ID, Primary: resources.Primary, Related: resources.Related, Operation: operation, Now: time.Now().UTC(), PolicyID: binding.PolicyID, PolicyVersion: binding.PolicyVersion, ScopeMode: binding.ScopeMode, Requirement: binding.Requirement}, nil
 }
 
 func resolveSubject(binding EndpointBinding, actor domain.Actor, resources LoadedResources) (domain.Subject, error) {

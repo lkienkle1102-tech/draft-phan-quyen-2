@@ -7,9 +7,9 @@ import (
 	"example.com/phan-quyen-golang/internal/security/domain"
 )
 
-type HardEngine struct{ facts Facts }
+type HardEngine struct{ facts BusinessFacts }
 
-func NewHardEngine(facts Facts) *HardEngine { return &HardEngine{facts: facts} }
+func NewHardEngine(facts BusinessFacts) *HardEngine { return &HardEngine{facts: facts} }
 
 func (e *HardEngine) Evaluate(ctx context.Context, request domain.Request, contract domain.EndpointContract) (domain.Request, domain.Decision, error) {
 	if request.Operation != contract.Operation || !actorAllowed(request.Actor, contract.ActorConstraint) {

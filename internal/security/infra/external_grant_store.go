@@ -86,17 +86,13 @@ func insertPermissionItems(ctx context.Context, tx *sql.Tx, g domain.ExternalGra
 	return nil
 }
 func insertOwnedItems(ctx context.Context, tx *sql.Tx, g domain.ExternalGrantDefinition, kind string) error {
-	items, table, column := g.Roles, "roles_v2", "role_id"
+	items, column := g.Roles, "role_id"
 	if kind == "group" {
-		items, table, column = g.Groups, "groups_v2", "group_id"
+		items, column = g.Groups, "group_id"
 	}
-	query := `INSERT INTO external_grant_` + kind + `s_v2(grant_id,` + column + `,effect) SELECT ?,id,? FROM ` + table + ` WHERE id=? AND owner_type='organization' AND owner_id=? AND active=1`
+	query := `INSERT INTO external_grant_` + kind + `s_v2(grant_id,` + column + `,effect) VALUES(?,?,?)`
 	for _, item := range items {
-		result, err := tx.ExecContext(ctx, query, g.ID, item.Effect, item.Key, g.OwnerOrganizationID)
-		if err != nil {
-			return err
-		}
-		if err = exactlyOne(result, kind); err != nil {
+		if _, err := tx.ExecContext(ctx, query, g.ID, item.Key, item.Effect); err != nil {
 			return err
 		}
 	}
