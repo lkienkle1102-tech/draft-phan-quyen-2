@@ -200,13 +200,16 @@ func addCasbinPermissionFacts(rules []security.PolicyRule, scope *scopeAccumulat
 }
 
 func propagatedOrigins(from, to string, current []policyOrigin) []policyOrigin {
-	if strings.HasPrefix(from, "user::") {
-		id := strings.TrimPrefix(to, "role::")
-		kind := "role"
-		if strings.HasPrefix(to, "group::") {
-			kind, id = "group", strings.TrimPrefix(to, "group::")
+	if strings.HasPrefix(to, "membership::") {
+		return current
+	}
+	if strings.HasPrefix(from, "user::") || strings.HasPrefix(from, "membership::") {
+		if strings.HasPrefix(to, "role::") {
+			return []policyOrigin{{kind: "role", id: strings.TrimPrefix(to, "role::")}}
 		}
-		return []policyOrigin{{kind: kind, id: id}}
+		if strings.HasPrefix(to, "group::") {
+			return []policyOrigin{{kind: "group", id: strings.TrimPrefix(to, "group::")}}
+		}
 	}
 	return current
 }

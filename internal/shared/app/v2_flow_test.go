@@ -95,8 +95,26 @@ func TestInvitationHTTPFlowAssignsOrganizationRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assigned := slices.Contains(snapshot.Rules, security.PolicyRule{PType: "g", V0: "user::user-personal", V1: "role::organization:org-a:finance", V2: "organization::org-a"})
-	if !assigned {
-		t.Fatal("accepted invitation did not assign organization role")
+	membershipID := "invitation:"
+	var invitationID string
+	if err = application.Database().QueryRow(`SELECT id FROM organization_invitations_v2 WHERE user_id='user-personal' AND status='accepted'`).Scan(&invitationID); err != nil {
+		t.Fatal(err)
+	}
+	membershipID += invitationID
+	domainID := "organization::org-a"
+	userEdge := security.PolicyRule{PType: "g", V0: "user::user-personal", V1: "membership::" + membershipID, V2: domainID}
+	roleEdge := security.PolicyRule{PType: "g", V0: "membership::" + membershipID, V1: "role::organization:org-a:finance", V2: domainID}
+	if !slices.Contains(snapshot.Rules, userEdge) || !slices.Contains(snapshot.Rules, roleEdge) {
+		t.Fatalf("accepted invitation policies=%+v", snapshot.Rules)
+	}
+	var active, provisioning, acceptances int
+	if err = application.Database().QueryRow(`SELECT active,provisioning FROM organization_members WHERE id=?`, membershipID).Scan(&active, &provisioning); err != nil {
+		t.Fatal(err)
+	}
+	if err = application.Database().QueryRow(`SELECT COUNT(*) FROM invitation_acceptances_v2 WHERE invitation_id=?`, invitationID).Scan(&acceptances); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 || provisioning != 0 || acceptances != 0 {
+		t.Fatalf("active=%d provisioning=%d acceptances=%d", active, provisioning, acceptances)
 	}
 }

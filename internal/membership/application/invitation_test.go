@@ -21,64 +21,109 @@ func TestInvitationValidatesRolesBeforePersistence(t *testing.T) {
 	}
 }
 
-func TestInvitationCompensatesOnlyCreatedPoliciesWhenDatabaseFails(t *testing.T) {
-	now := time.Now().UTC()
-	value := membership.Invitation{ID: "invitation", OrganizationID: "org-a", UserID: "user-a", TokenHash: "hash", RoleIDs: []string{"finance"}}
-	added := domain.PolicyRule{PType: "g", V0: "user::user-a", V1: "role::finance", V2: "organization::org-a"}
-	directory := &invitationDirectory{receipt: domain.AssignmentReceipt{Added: []domain.PolicyRule{added}}}
-	repository := &invitationRepository{loaded: value, acceptErr: errors.New("database failed")}
-	service := NewInvitationService(repository, directory)
-	err := service.Accept(context.Background(), "hash", "user-a", now)
-	if err == nil || !repository.accepted || len(directory.compensated.Added) != 1 || directory.compensated.Added[0] != added {
-		t.Fatalf("err=%v accepted=%v compensated=%+v", err, repository.accepted, directory.compensated)
+func TestInvitationAbortsTechnicalStateWhenRoleSyncDidNotMutate(t *testing.T) {
+	repository := acceptanceRepository()
+	directory := &invitationDirectory{syncErr: errors.New("validation failed")}
+	err := NewInvitationService(repository, directory).Accept(context.Background(), "hash", "user-a", time.Now().UTC())
+	if err == nil || !repository.aborted || repository.released || repository.completed {
+		t.Fatalf("err=%v repository=%+v", err, repository)
 	}
 }
 
-func TestInvitationAssignmentFailureDoesNotWriteMembership(t *testing.T) {
-	repository := &invitationRepository{loaded: membership.Invitation{OrganizationID: "org-a", RoleIDs: []string{"finance"}}}
-	directory := &invitationDirectory{ensureErr: errors.New("Casdoor unavailable")}
+func TestInvitationKeepsProvisioningWhenRoleSyncMayHaveMutated(t *testing.T) {
+	repository := acceptanceRepository()
+	directory := &invitationDirectory{syncResult: domain.RoleSyncResult{ExternalMutationPossible: true}, syncErr: errors.New("Casdoor timeout")}
 	err := NewInvitationService(repository, directory).Accept(context.Background(), "hash", "user-a", time.Now().UTC())
-	if err == nil || repository.accepted {
-		t.Fatalf("err=%v accepted=%v", err, repository.accepted)
+	if err == nil || repository.aborted || !repository.released || repository.completed {
+		t.Fatalf("err=%v repository=%+v", err, repository)
+	}
+}
+
+func TestInvitationKeepsProvisioningWhenRecoveryFailsBeforeMutation(t *testing.T) {
+	repository := acceptanceRepository()
+	repository.acceptance.Recovery = true
+	directory := &invitationDirectory{syncErr: errors.New("Casdoor unavailable")}
+	err := NewInvitationService(repository, directory).Accept(context.Background(), "hash", "user-a", time.Now().UTC())
+	if err == nil || repository.aborted || !repository.released || repository.completed {
+		t.Fatalf("err=%v repository=%+v", err, repository)
+	}
+}
+
+func TestInvitationReleasesAcceptanceWhenCompletionFails(t *testing.T) {
+	repository := acceptanceRepository()
+	repository.completeErr = errors.New("database failed")
+	err := NewInvitationService(repository, &invitationDirectory{}).Accept(context.Background(), "hash", "user-a", time.Now().UTC())
+	if err == nil || !repository.completed || !repository.released || repository.aborted {
+		t.Fatalf("err=%v repository=%+v", err, repository)
+	}
+}
+
+func TestInvitationCompletesAfterRolesAreReady(t *testing.T) {
+	repository := acceptanceRepository()
+	directory := &invitationDirectory{}
+	if err := NewInvitationService(repository, directory).Accept(context.Background(), "hash", "user-a", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if !repository.completed || repository.released || repository.aborted || directory.membershipID != "invitation:invitation" {
+		t.Fatalf("repository=%+v membershipID=%q", repository, directory.membershipID)
 	}
 }
 
 type invitationRepository struct {
-	loaded            membership.Invitation
-	created, accepted bool
-	acceptErr         error
+	acceptance                  membership.InvitationAcceptance
+	created, completed          bool
+	released, aborted           bool
+	completeErr, release, abort error
+}
+
+func acceptanceRepository() *invitationRepository {
+	invitation := membership.Invitation{ID: "invitation", OrganizationID: "org-a", UserID: "user-a", TokenHash: "hash", RoleIDs: []string{"finance"}}
+	return &invitationRepository{acceptance: membership.InvitationAcceptance{ClaimID: "claim", MembershipID: "invitation:invitation", Invitation: invitation}}
 }
 
 func (f *invitationRepository) CreateInvitation(context.Context, membership.Invitation) error {
 	f.created = true
 	return nil
 }
-func (f *invitationRepository) LoadInvitation(context.Context, string, string, time.Time) (membership.Invitation, error) {
-	return f.loaded, nil
+
+func (f *invitationRepository) ClaimAcceptance(context.Context, string, string, time.Time, time.Time) (membership.InvitationAcceptance, error) {
+	return f.acceptance, nil
 }
-func (f *invitationRepository) AcceptInvitation(context.Context, string, string, time.Time) error {
-	f.accepted = true
-	return f.acceptErr
+
+func (f *invitationRepository) CompleteAcceptance(context.Context, string, time.Time) error {
+	f.completed = true
+	return f.completeErr
+}
+
+func (f *invitationRepository) ReleaseAcceptance(context.Context, string, time.Time) error {
+	f.released = true
+	return f.release
+}
+
+func (f *invitationRepository) AbortAcceptance(context.Context, string) error {
+	f.aborted = true
+	return f.abort
 }
 
 type invitationDirectory struct {
-	validateErr, ensureErr error
-	receipt, compensated   domain.AssignmentReceipt
+	validateErr, syncErr error
+	syncResult           domain.RoleSyncResult
+	membershipID         string
 }
 
 func (f *invitationDirectory) Snapshot(context.Context) (domain.AuthorizationSnapshot, error) {
 	return domain.AuthorizationSnapshot{}, nil
 }
+
 func (f *invitationDirectory) ValidateRoles(context.Context, domain.Subject, []string) error {
 	return f.validateErr
 }
+
 func (f *invitationDirectory) ValidateGroups(context.Context, domain.Subject, []string) error {
 	return nil
 }
-func (f *invitationDirectory) EnsureRoles(context.Context, domain.Actor, domain.Subject, []string) (domain.AssignmentReceipt, error) {
-	return f.receipt, f.ensureErr
-}
-func (f *invitationDirectory) CompensateRoles(_ context.Context, receipt domain.AssignmentReceipt) error {
-	f.compensated = receipt
-	return nil
+
+func (f *invitationDirectory) EnsureMembershipRoles(_ context.Context, _ domain.Actor, _ domain.Subject, membershipID string, _ []string) (domain.RoleSyncResult, error) {
+	f.membershipID = membershipID
+	return f.syncResult, f.syncErr
 }

@@ -11,10 +11,14 @@ import (
 
 var ErrInvalidInvitation = errors.New("invalid organization invitation")
 
+const invitationAcceptanceLease = time.Minute
+
 type InvitationRepository interface {
 	CreateInvitation(context.Context, domain.Invitation) error
-	LoadInvitation(context.Context, string, string, time.Time) (domain.Invitation, error)
-	AcceptInvitation(context.Context, string, string, time.Time) error
+	ClaimAcceptance(context.Context, string, string, time.Time, time.Time) (domain.InvitationAcceptance, error)
+	CompleteAcceptance(context.Context, string, time.Time) error
+	ReleaseAcceptance(context.Context, string, time.Time) error
+	AbortAcceptance(context.Context, string) error
 }
 
 type InvitationService struct {
@@ -41,18 +45,22 @@ func (s *InvitationService) Accept(ctx context.Context, tokenHash, userID string
 	if tokenHash == "" || userID == "" || at.IsZero() {
 		return ErrInvalidInvitation
 	}
-	invitation, err := s.repository.LoadInvitation(ctx, tokenHash, userID, at)
+	acceptance, err := s.repository.ClaimAcceptance(ctx, tokenHash, userID, at, at.Add(invitationAcceptanceLease))
 	if err != nil {
 		return err
 	}
+	invitation := acceptance.Invitation
 	actor := security.Actor{ID: userID, Type: security.ActorUser}
 	subject := security.Subject{Type: security.SubjectOrganization, ID: invitation.OrganizationID}
-	receipt, err := s.directory.EnsureRoles(ctx, actor, subject, invitation.RoleIDs)
+	syncResult, err := s.directory.EnsureMembershipRoles(ctx, actor, subject, acceptance.MembershipID, invitation.RoleIDs)
 	if err != nil {
-		return err
+		if !acceptance.Recovery && !syncResult.ExternalMutationPossible {
+			return errors.Join(err, s.repository.AbortAcceptance(ctx, acceptance.ClaimID))
+		}
+		return errors.Join(err, s.repository.ReleaseAcceptance(ctx, acceptance.ClaimID, at))
 	}
-	if err = s.repository.AcceptInvitation(ctx, tokenHash, userID, at); err != nil {
-		return errors.Join(err, s.directory.CompensateRoles(ctx, receipt))
+	if err = s.repository.CompleteAcceptance(ctx, acceptance.ClaimID, at); err != nil {
+		return errors.Join(err, s.repository.ReleaseAcceptance(ctx, acceptance.ClaimID, at))
 	}
 	return nil
 }

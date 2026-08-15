@@ -18,6 +18,7 @@ var ErrInvalidCasdoorConfiguration = errors.New("invalid Casdoor configuration")
 var ErrInvalidCasdoorToken = errors.New("invalid Casdoor token")
 var ErrUnknownCasdoorRole = errors.New("unknown Casdoor role")
 var ErrUnknownCasdoorGroup = errors.New("unknown Casdoor group")
+var ErrIncompleteCasdoorRoleSync = errors.New("incomplete Casdoor role synchronization")
 
 type casdoorClient interface {
 	IntrospectToken(string, string) (*casdoorsdk.IntrospectTokenResult, error)
@@ -164,42 +165,38 @@ func (c *Casdoor) ValidateGroups(ctx context.Context, subject domain.Subject, gr
 	return nil
 }
 
-func (c *Casdoor) EnsureRoles(ctx context.Context, actor domain.Actor, subject domain.Subject, roleIDs []string) (domain.AssignmentReceipt, error) {
+func (c *Casdoor) EnsureMembershipRoles(ctx context.Context, actor domain.Actor, subject domain.Subject, membershipID string, roleIDs []string) (domain.RoleSyncResult, error) {
 	if err := c.ValidateRoles(ctx, subject, roleIDs); err != nil {
-		return domain.AssignmentReceipt{}, err
+		return domain.RoleSyncResult{}, err
 	}
 	snapshot, err := c.Snapshot(ctx)
 	if err != nil {
-		return domain.AssignmentReceipt{}, err
+		return domain.RoleSyncResult{}, err
 	}
-	receipt := domain.AssignmentReceipt{}
-	for _, roleID := range roleIDs {
-		rule := domain.PolicyRule{PType: "g", V0: actorPrincipal(actor), V1: rolePrincipal(roleID), V2: subjectDomain(subject)}
+	result := domain.RoleSyncResult{}
+	required := membershipRoleRules(actor, subject, membershipID, roleIDs)
+	for _, rule := range required {
 		if containsRule(snapshot.Rules, rule) {
 			continue
 		}
-		added, addErr := c.client.AddPolicy(c.enforcer(), toCasbinRule(rule))
-		if addErr != nil {
-			_ = c.CompensateRoles(ctx, receipt)
-			return domain.AssignmentReceipt{}, addErr
+		if err = ctx.Err(); err != nil {
+			return result, err
 		}
-		if added {
-			receipt.Added = append(receipt.Added, rule)
+		result.ExternalMutationPossible = true
+		if _, err = c.client.AddPolicy(c.enforcer(), toCasbinRule(rule)); err != nil {
+			return result, err
 		}
 	}
-	return receipt, nil
-}
-
-func (c *Casdoor) CompensateRoles(ctx context.Context, receipt domain.AssignmentReceipt) error {
-	var result error
-	for index := len(receipt.Added) - 1; index >= 0; index-- {
-		if err := ctx.Err(); err != nil {
-			return errors.Join(result, err)
-		}
-		_, err := c.client.RemovePolicy(c.enforcer(), toCasbinRule(receipt.Added[index]))
-		result = errors.Join(result, err)
+	verified, err := c.Snapshot(ctx)
+	if err != nil {
+		return result, err
 	}
-	return result
+	for _, rule := range required {
+		if !containsRule(verified.Rules, rule) {
+			return result, ErrIncompleteCasdoorRoleSync
+		}
+	}
+	return result, nil
 }
 
 func (c *Casdoor) enforcer() *casdoorsdk.Enforcer {
@@ -214,6 +211,17 @@ func actorPrincipal(actor domain.Actor) string {
 }
 
 func rolePrincipal(value string) string { return "role::" + value }
+
+func membershipPrincipal(value string) string { return "membership::" + value }
+
+func membershipRoleRules(actor domain.Actor, subject domain.Subject, membershipID string, roleIDs []string) []domain.PolicyRule {
+	domainID, membership := subjectDomain(subject), membershipPrincipal(membershipID)
+	rules := make([]domain.PolicyRule, 0, len(roleIDs)+1)
+	for _, roleID := range roleIDs {
+		rules = append(rules, domain.PolicyRule{PType: "g", V0: membership, V1: rolePrincipal(roleID), V2: domainID})
+	}
+	return append(rules, domain.PolicyRule{PType: "g", V0: actorPrincipal(actor), V1: membership, V2: domainID})
+}
 
 func subjectDomain(subject domain.Subject) string { return string(subject.Type) + "::" + subject.ID }
 

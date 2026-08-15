@@ -24,3 +24,21 @@ func TestFeatureDenyWinsAndIsSubjectScoped(t *testing.T) {
 		t.Fatalf("org-b allowed=%v err=%v", allowed, err)
 	}
 }
+
+func TestProvisioningMembershipDoesNotPassHardMembershipGate(t *testing.T) {
+	database := testutil.Database(t)
+	if _, err := database.Exec(`INSERT INTO organization_members(id,organization_id,user_id,active,provisioning,joined_at) VALUES('invitation:pending','org-b','user-personal',0,1,'2020-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	member, err := infra.NewRepository(database).IsMember(
+		context.Background(),
+		domain.Actor{ID: "user-personal", Type: domain.ActorUser},
+		domain.Subject{ID: "org-b", Type: domain.SubjectOrganization},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if member {
+		t.Fatal("provisioning membership passed the hard membership gate")
+	}
+}

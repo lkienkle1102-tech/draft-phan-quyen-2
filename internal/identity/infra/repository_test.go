@@ -33,7 +33,8 @@ func TestReadSeparatesScopesAndAppliesDenyWins(t *testing.T) {
 	}
 	insertPlan(t, database, now)
 	directory := casdoortest.NewFakeCasdoor()
-	directory.AddRule(security.PolicyRule{PType: "g", V0: "user::user-a", V1: "role::organization:org-b:finance", V2: "organization::org-b"})
+	directory.AddRule(security.PolicyRule{PType: "g", V0: "user::user-a", V1: "membership::org-b:user-a", V2: "organization::org-b"})
+	directory.AddRule(security.PolicyRule{PType: "g", V0: "membership::org-b:user-a", V1: "role::organization:org-b:finance", V2: "organization::org-b"})
 	directory.AddRule(security.PolicyRule{PType: "p", V0: "user::user-a", V1: "organization::org-b", V2: "invoice", V3: "approve", V4: "deny"})
 	directory.AddRule(security.PolicyRule{PType: "p", V0: "user::user-a", V1: "user::user-a", V2: "invoice", V3: "approve", V4: "allow"})
 	snapshot, err := identityinfra.NewRepository(database, directory).Read(context.Background(), security.Actor{ID: "user-a", Type: security.ActorUser}, now)
@@ -41,6 +42,33 @@ func TestReadSeparatesScopesAndAppliesDenyWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSeparatedSnapshot(t, snapshot)
+}
+
+func TestReadHidesProvisioningMembershipAndItsAuthority(t *testing.T) {
+	database := testutil.Database(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := database.Exec(`INSERT INTO organization_members(id,organization_id,user_id,active,provisioning,joined_at) VALUES('invitation:hidden','org-b','user-personal',0,1,?)`, now.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	insertGrant(t, database, "hidden-organization-grant", "organization", "", "org-b", "", now)
+	directory := casdoortest.NewFakeCasdoor()
+	directory.AddRule(security.PolicyRule{PType: "g", V0: "user::user-personal", V1: "membership::invitation:hidden", V2: "organization::org-b"})
+	directory.AddRule(security.PolicyRule{PType: "g", V0: "membership::invitation:hidden", V1: "role::organization:org-b:finance", V2: "organization::org-b"})
+	repository := identityinfra.NewRepository(database, directory)
+	snapshot, err := repository.Read(context.Background(), security.Actor{ID: "user-personal", Type: security.ActorUser}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range snapshot.Organizations {
+		if scope.Organization.ID == "org-b" {
+			t.Fatal("provisioning organization leaked into /me")
+		}
+	}
+	for _, grant := range snapshot.ExternalGrants {
+		if grant.ID == "hidden-organization-grant" {
+			t.Fatal("organization-target grant leaked through provisioning membership")
+		}
+	}
 }
 
 func assertSeparatedSnapshot(t *testing.T, snapshot identity.Snapshot) {

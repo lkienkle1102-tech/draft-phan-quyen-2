@@ -7,12 +7,15 @@ CREATE TABLE organization_members(
     organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     active INTEGER NOT NULL DEFAULT 1 CHECK(active IN(0,1)),
+    provisioning INTEGER NOT NULL DEFAULT 0 CHECK(provisioning IN(0,1)),
     joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     left_at TEXT,
+    CHECK(active=0 OR provisioning=0),
+    CHECK(provisioning=0 OR left_at IS NULL),
     CHECK((active=1 AND left_at IS NULL) OR active=0),
     CHECK(left_at IS NULL OR left_at>=joined_at)
 );
-CREATE UNIQUE INDEX organization_members_one_active ON organization_members(organization_id,user_id) WHERE active=1;
+CREATE UNIQUE INDEX organization_members_one_current ON organization_members(organization_id,user_id) WHERE active=1 OR provisioning=1;
 
 CREATE TABLE organization_membership_applications(
     id TEXT PRIMARY KEY,
@@ -141,6 +144,14 @@ CREATE TABLE organization_invitations_v2(
 CREATE TABLE organization_invitation_roles_v2(
     invitation_id TEXT NOT NULL REFERENCES organization_invitations_v2(id) ON DELETE CASCADE,
     role_id TEXT NOT NULL,PRIMARY KEY(invitation_id,role_id)
+);
+CREATE TABLE invitation_acceptances_v2(
+    invitation_id TEXT PRIMARY KEY REFERENCES organization_invitations_v2(id) ON DELETE CASCADE,
+    membership_id TEXT NOT NULL UNIQUE REFERENCES organization_members(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+    claim_id TEXT NOT NULL UNIQUE,
+    lease_until TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 1 CHECK(attempt_count>=1)
 );
 
 CREATE TABLE external_grants_v2(

@@ -24,14 +24,13 @@ type AuthorizationSnapshot struct {
 	Groups map[string]DirectoryObject
 }
 
-type AssignmentReceipt struct{ Added []PolicyRule }
+type RoleSyncResult struct{ ExternalMutationPossible bool }
 
 type AuthorizationDirectory interface {
 	Snapshot(context.Context) (AuthorizationSnapshot, error)
 	ValidateRoles(context.Context, Subject, []string) error
 	ValidateGroups(context.Context, Subject, []string) error
-	EnsureRoles(context.Context, Actor, Subject, []string) (AssignmentReceipt, error)
-	CompensateRoles(context.Context, AssignmentReceipt) error
+	EnsureMembershipRoles(context.Context, Actor, Subject, string, []string) (RoleSyncResult, error)
 }
 
 func PoliciesForPrincipal(rules []PolicyRule, principal, domainID string) []PolicyRule {

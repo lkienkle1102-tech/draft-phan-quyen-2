@@ -153,30 +153,28 @@ func validateDirectoryObjects(values map[string]security.DirectoryObject, subjec
 	return nil
 }
 
-func (f *FakeCasdoor) EnsureRoles(ctx context.Context, actor security.Actor, subject security.Subject, roleIDs []string) (security.AssignmentReceipt, error) {
+func (f *FakeCasdoor) EnsureMembershipRoles(ctx context.Context, actor security.Actor, subject security.Subject, membershipID string, roleIDs []string) (security.RoleSyncResult, error) {
 	if err := f.ValidateRoles(ctx, subject, roleIDs); err != nil {
-		return security.AssignmentReceipt{}, err
+		return security.RoleSyncResult{}, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	receipt := security.AssignmentReceipt{}
+	result := security.RoleSyncResult{}
+	domainID := string(subject.Type) + "::" + subject.ID
+	membership := "membership::" + membershipID
 	for _, roleID := range roleIDs {
-		rule := security.PolicyRule{PType: "g", V0: "user::" + actor.ID, V1: "role::" + roleID, V2: string(subject.Type) + "::" + subject.ID}
+		rule := security.PolicyRule{PType: "g", V0: membership, V1: "role::" + roleID, V2: domainID}
 		if !slices.Contains(f.snapshot.Rules, rule) {
 			f.snapshot.Rules = append(f.snapshot.Rules, rule)
-			receipt.Added = append(receipt.Added, rule)
+			result.ExternalMutationPossible = true
 		}
 	}
-	return receipt, nil
-}
-
-func (f *FakeCasdoor) CompensateRoles(_ context.Context, receipt security.AssignmentReceipt) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, removed := range receipt.Added {
-		f.snapshot.Rules = slices.DeleteFunc(f.snapshot.Rules, func(rule security.PolicyRule) bool { return rule == removed })
+	userRule := security.PolicyRule{PType: "g", V0: "user::" + actor.ID, V1: membership, V2: domainID}
+	if !slices.Contains(f.snapshot.Rules, userRule) {
+		f.snapshot.Rules = append(f.snapshot.Rules, userRule)
+		result.ExternalMutationPossible = true
 	}
-	return nil
+	return result, nil
 }
 
 func cloneSnapshot(value security.AuthorizationSnapshot) security.AuthorizationSnapshot {

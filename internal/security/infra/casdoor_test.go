@@ -65,7 +65,7 @@ func TestCasdoorAuthenticateFailsClosed(t *testing.T) {
 	}
 }
 
-func TestCasdoorEnforceSnapshotAndRoleReceipt(t *testing.T) {
+func TestCasdoorEnforceSnapshotAndMembershipRoleSync(t *testing.T) {
 	client := &fakeCasdoorClient{
 		enforce: true,
 		policies: []*casdoorsdk.CasbinRule{
@@ -83,16 +83,36 @@ func TestCasdoorEnforceSnapshotAndRoleReceipt(t *testing.T) {
 	if err != nil || len(snapshot.Rules) != 1 || snapshot.Roles["finance"].Name != "Finance" || snapshot.Groups["reviewers"].Name != "Reviewers" {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
-	receipt, err := adapter.EnsureRoles(context.Background(), domain.Actor{ID: "user-a", Type: domain.ActorUser}, domain.Subject{Type: domain.SubjectOrganization, ID: "org-a"}, []string{"finance"})
-	if err != nil || len(receipt.Added) != 1 {
-		t.Fatalf("receipt=%+v err=%v", receipt, err)
+	result, err := adapter.EnsureMembershipRoles(context.Background(), domain.Actor{ID: "user-a", Type: domain.ActorUser}, domain.Subject{Type: domain.SubjectOrganization, ID: "org-a"}, "invitation:one", []string{"finance"})
+	if err != nil || !result.ExternalMutationPossible || len(client.policies) != 3 {
+		t.Fatalf("result=%+v policies=%+v err=%v", result, client.policies, err)
 	}
-	second, err := adapter.EnsureRoles(context.Background(), domain.Actor{ID: "user-a", Type: domain.ActorUser}, domain.Subject{Type: domain.SubjectOrganization, ID: "org-a"}, []string{"finance"})
-	if err != nil || len(second.Added) != 0 {
+	second, err := adapter.EnsureMembershipRoles(context.Background(), domain.Actor{ID: "user-a", Type: domain.ActorUser}, domain.Subject{Type: domain.SubjectOrganization, ID: "org-a"}, "invitation:one", []string{"finance"})
+	if err != nil || second.ExternalMutationPossible {
 		t.Fatalf("second=%+v err=%v", second, err)
 	}
-	if err = adapter.CompensateRoles(context.Background(), receipt); err != nil || len(client.policies) != 1 {
-		t.Fatalf("policies=%+v err=%v", client.policies, err)
+	if client.removeCalls != 0 {
+		t.Fatalf("RemovePolicy called %d times", client.removeCalls)
+	}
+}
+
+func TestCasdoorMembershipRoleSyncRetriesPartialMutationWithoutRemoval(t *testing.T) {
+	client := &fakeCasdoorClient{
+		policies:   []*casdoorsdk.CasbinRule{{Ptype: "p", V0: "role::finance", V1: "organization::org-a", V2: "invoice", V3: "approve", V4: "allow"}},
+		roles:      []*casdoorsdk.Role{{Name: "finance", Domains: []string{"organization::org-a"}}, {Name: "reviewer", Domains: []string{"organization::org-a"}}},
+		addErrorAt: 2,
+	}
+	adapter := newCasdoorWithClient(testCasdoorConfig(), client)
+	actor := domain.Actor{ID: "user-a", Type: domain.ActorUser}
+	subject := domain.Subject{Type: domain.SubjectOrganization, ID: "org-a"}
+	result, err := adapter.EnsureMembershipRoles(context.Background(), actor, subject, "invitation:one", []string{"finance", "reviewer"})
+	if err == nil || !result.ExternalMutationPossible || client.removeCalls != 0 || len(client.policies) != 2 {
+		t.Fatalf("result=%+v policies=%+v removes=%d err=%v", result, client.policies, client.removeCalls, err)
+	}
+	client.addErrorAt = 0
+	result, err = adapter.EnsureMembershipRoles(context.Background(), actor, subject, "invitation:one", []string{"finance", "reviewer"})
+	if err != nil || !result.ExternalMutationPossible || len(client.policies) != 4 || client.removeCalls != 0 {
+		t.Fatalf("result=%+v policies=%+v removes=%d err=%v", result, client.policies, client.removeCalls, err)
 	}
 }
 
@@ -115,6 +135,9 @@ type fakeCasdoorClient struct {
 	roles         []*casdoorsdk.Role
 	groups        []*casdoorsdk.Group
 	enforce       bool
+	addCalls      int
+	addErrorAt    int
+	removeCalls   int
 	err, parseErr error
 }
 
@@ -133,6 +156,10 @@ func (f *fakeCasdoorClient) GetPolicies(string, string) ([]*casdoorsdk.CasbinRul
 func (f *fakeCasdoorClient) GetRoles() ([]*casdoorsdk.Role, error)   { return f.roles, f.err }
 func (f *fakeCasdoorClient) GetGroups() ([]*casdoorsdk.Group, error) { return f.groups, f.err }
 func (f *fakeCasdoorClient) AddPolicy(_ *casdoorsdk.Enforcer, rule *casdoorsdk.CasbinRule) (bool, error) {
+	f.addCalls++
+	if f.addErrorAt != 0 && f.addCalls == f.addErrorAt {
+		return false, errors.New("add policy failed")
+	}
 	if f.err != nil {
 		return false, f.err
 	}
@@ -145,6 +172,7 @@ func (f *fakeCasdoorClient) AddPolicy(_ *casdoorsdk.Enforcer, rule *casdoorsdk.C
 	return true, nil
 }
 func (f *fakeCasdoorClient) RemovePolicy(_ *casdoorsdk.Enforcer, rule *casdoorsdk.CasbinRule) (bool, error) {
+	f.removeCalls++
 	if f.err != nil {
 		return false, f.err
 	}
