@@ -1,0 +1,13 @@
+INSERT OR IGNORE INTO organizations VALUES('org-a','Owner'),('org-b','Partner');
+INSERT OR IGNORE INTO users VALUES('user-a','org-a',1),('user-b','org-b',1);
+INSERT OR IGNORE INTO organization_members VALUES('org-a','user-a',1),('org-b','user-b',1);
+INSERT OR IGNORE INTO permissions VALUES('invoice.approve','invoice','approve');
+INSERT OR IGNORE INTO roles VALUES('finance','finance-manager');
+INSERT OR IGNORE INTO role_permissions VALUES('finance','invoice.approve');
+INSERT OR IGNORE INTO subject_user_roles VALUES('organization','org-a','user-a','finance'),('organization','org-b','user-b','finance');
+INSERT OR IGNORE INTO subject_features VALUES('organization','org-a','invoice_management',1),('organization','org-b','invoice_management',1);
+INSERT OR IGNORE INTO quota_counters(subject_type,subject_id,quota_key,quota_limit) VALUES('organization','org-a','invoice_approvals',100),('organization','org-b','invoice_approvals',10);
+INSERT OR IGNORE INTO invoices VALUES('invoice-a','org-a','user-a','user-a','pending',50000,'vn',0,1),('invoice-partner','org-a','user-a','user-b','pending',25000,'vn',0,1);
+INSERT OR IGNORE INTO authorization_policies VALUES('invoice-approve',1,1);
+INSERT OR IGNORE INTO policy_nodes VALUES('root','invoice-approve',1,NULL,'ALL',NULL,'{}',0),('permission','invoice-approve',1,'root','RULE','permission','{}',0),('feature','invoice-approve',1,'root','RULE','feature','{"feature":{"String":"invoice_management"}}',1),('quota','invoice-approve',1,'root','RULE','quota_available','{"quota":{"String":"invoice_approvals"},"cost":{"Int":1}}',2);
+INSERT OR IGNORE INTO endpoint_bindings VALUES('invoice-approve','POST','/v1/organizations/:organizationID/invoices/:invoiceID/approve','invoice','approve','invoice','approve','invoice-approve',1,1);

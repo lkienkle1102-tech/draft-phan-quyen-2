@@ -1,0 +1,41 @@
+---
+description: Repository workflow, safety, reuse, and validation rules
+alwaysApply: true
+---
+
+# Rule Before Plan and Code
+
+## Before implementation
+
+1. Read `AGENTS.md` completely.
+2. Establish or reuse the conversation's external Session ID.
+3. Read all existing `.context/` files and reuse exactly `.context/session-<SESSION_ID>.md` for writable implementation state.
+4. Inspect Git status and preserve unrelated user changes.
+5. Read relevant documentation, rules, skills, and existing implementations.
+6. Use GitNexus impact analysis when a current index exists and the task changes an existing symbol.
+
+## Plan
+
+- Identify the requested outcome, explicit exclusions, affected files, reuse opportunities, risks, and validation commands.
+- Write a detailed project plan for broad or risky work. A small, explicit task may proceed directly.
+- Do not expand scope or add infrastructure without user authorization.
+
+## Code
+
+- Reuse equivalent resources instead of duplicating them.
+- Keep code modular and in the documented layout.
+- Keep business logic out of entry points.
+- Prefer the Go standard library unless an external dependency is justified.
+- Write code, comments, identifiers, and technical documentation in English.
+- Never hardcode secrets, credentials, private endpoints, or environment-derived values.
+- Do not add CI/CD, Docker, deployment, or infrastructure assets unless explicitly requested.
+
+## Validation
+
+Run `make check-all`, fix every failure caused by the implementation, and rerun until it passes. Review the final Git diff and non-ignored untracked files. When GitNexus is configured, detect changes before committing and refresh its index afterward.
+
+## Documentation and handoff
+
+Synchronize relevant documentation with the final code. Update only the current Session ID's `.context/session-<SESSION_ID>.md` with implemented work, actual checks, failures and fixes, risks, and lessons learned.
+
+Use commitlint-compatible Conventional Commits and never claim a command or check passed unless it actually completed successfully.

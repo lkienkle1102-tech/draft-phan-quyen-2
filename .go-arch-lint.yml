@@ -1,0 +1,46 @@
+version: 3
+workdir: internal
+
+allow:
+  # Vendor allowlist is enforced by golangci depguard (main rule). Here we only check internal layers.
+  depOnAnyVendor: true
+  # false = chỉ check import giữa layer; không quét inject/type-flow (wire, BindJSON, middleware…).
+  deepScan: false
+
+
+excludeFiles:
+  - "^.*_test\\.go$"
+
+components:
+  domain:
+    in: "*/domain"
+  application:
+    in: "*/application"
+  infra:
+    in: "*/infra"
+  delivery:
+    in: "*/delivery"
+  shared:
+    in: "shared/**"
+
+
+deps:
+  domain:
+    mayDependOn:
+      - shared
+  application:
+    mayDependOn:
+      - domain
+      - shared
+  infra:
+    mayDependOn:
+      - application
+      - domain
+      - shared
+  delivery:
+    mayDependOn:
+      - application
+      - domain
+      - shared
+  shared:
+    anyProjectDeps: true

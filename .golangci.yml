@@ -1,0 +1,63 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - dupl
+    - errcheck
+    - funlen
+    - gocyclo
+    - govet
+    - nolintlint
+    - revive
+    - staticcheck
+    - unused
+
+  settings:
+    depguard:
+      rules:
+        main:
+          files:
+            - $all
+          allow:
+            - $gostd
+            - example.com/phan-quyen-golang
+            - golang.org
+            - modernc.org/sqlite
+            - github.com
+        domain-boundaries:
+          list-mode: lax
+          files:
+            - "**/internal/**/domain/**/*.go"
+          deny:
+            - pkg: database/sql
+              desc: domain packages must not access databases directly
+            - pkg: encoding/json
+              desc: domain packages must not own transport serialization
+            - pkg: net/http
+              desc: domain packages must not depend on HTTP transport
+            - pkg: os
+              desc: domain packages must not read process environment or files
+    dupl:
+      threshold: 60
+    funlen:
+      lines: 60
+      statements: 40
+    gocyclo:
+      min-complexity: 15
+    nolintlint:
+      allow-unused: false
+      allow-no-explanation: []
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: file-length-limit
+          arguments:
+            - max: 600
+              skip-comments: true
+              skip-blank-lines: true
+        - name: argument-limit
+          severity: error
+          arguments: [8]
